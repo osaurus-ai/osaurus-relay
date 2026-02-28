@@ -45,6 +45,24 @@ export interface ResponseFrame {
   body: string;
 }
 
+export interface StreamStartFrame {
+  type: "stream_start";
+  id: string;
+  status: number;
+  headers: Record<string, string>;
+}
+
+export interface StreamChunkFrame {
+  type: "stream_chunk";
+  id: string;
+  data: string;
+}
+
+export interface StreamEndFrame {
+  type: "stream_end";
+  id: string;
+}
+
 export interface RequestChallengeFrame {
   type: "request_challenge";
 }
@@ -55,6 +73,9 @@ export type InboundFrame =
   | RemoveAgentFrame
   | PongFrame
   | ResponseFrame
+  | StreamStartFrame
+  | StreamChunkFrame
+  | StreamEndFrame
   | RequestChallengeFrame;
 
 // --- Outbound frames (relay -> Osaurus client) ---
@@ -118,6 +139,14 @@ export type OutboundFrame =
 
 export interface PendingRequest {
   resolve: (response: ResponseFrame) => void;
+  resolveStream: (response: StreamStartFrame) => void;
+  timer: number;
+}
+
+// --- Active streaming request tracking ---
+
+export interface StreamingRequest {
+  controller: ReadableStreamDefaultController<Uint8Array>;
   timer: number;
 }
 
@@ -127,6 +156,7 @@ export interface TunnelConnection {
   ws: WebSocket;
   agents: Set<string>;
   pending: Map<string, PendingRequest>;
+  streaming: Map<string, StreamingRequest>;
   missedPings: number;
   keepaliveTimer: number;
   pendingNonce: string | null;

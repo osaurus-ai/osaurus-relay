@@ -54,7 +54,8 @@ osaurus-relay/
 │   ├── rate_limit_test.ts
 │   ├── stats_test.ts    # Analytics endpoint + counter tests
 │   ├── tunnel_test.ts   # Tunnel connect/disconnect/multi-agent tests
-│   └── relay_test.ts    # Request forwarding tests
+│   ├── relay_test.ts    # Request forwarding tests
+│   └── streaming_test.ts # Streaming response tests
 ├── Dockerfile           # Deno container for Fly.io
 ├── fly.toml             # Fly.io app config
 └── deno.json            # Deno config, tasks, imports
@@ -229,7 +230,11 @@ When a public HTTP request arrives at an agent's subdomain, the relay forwards i
 }
 ```
 
-The client **must** respond with a matching `id`:
+The client **must** respond with a matching `id`. There are two response modes:
+
+#### Buffered Response
+
+For non-streaming endpoints, send a single `response` frame with the complete body:
 
 ```json
 {
@@ -241,9 +246,24 @@ The client **must** respond with a matching `id`:
 }
 ```
 
-If no response is sent within **30 seconds**, the relay returns `504 Gateway Timeout` to the caller.
+#### Streaming Response
 
-Multiple requests can be in-flight simultaneously over the same WebSocket — the `id` field is used to match responses to requests.
+For streaming endpoints (e.g. SSE), send a `stream_start` frame to begin the response, followed by any number of `stream_chunk` frames, and a final `stream_end` frame:
+
+```json
+{ "type": "stream_start", "id": "req_abc123", "status": 200, "headers": { "content-type": "text/event-stream" } }
+{ "type": "stream_chunk", "id": "req_abc123", "data": "data: {\"token\": \"Hello\"}\n\n" }
+{ "type": "stream_chunk", "id": "req_abc123", "data": "data: {\"token\": \" world\"}\n\n" }
+{ "type": "stream_end", "id": "req_abc123" }
+```
+
+The relay flushes headers to the HTTP client on `stream_start` and writes each chunk incrementally. The stream has a **30-second inactivity timeout** — if no `stream_chunk` or `stream_end` is received within 30 seconds of the last frame, the relay closes the stream.
+
+#### Timeouts
+
+If no `response` or `stream_start` is sent within **30 seconds**, the relay returns `504 Gateway Timeout` to the caller.
+
+Multiple requests can be in-flight simultaneously over the same WebSocket — the `id` field is used to match responses to requests. The client chooses per-request whether to use buffered or streaming mode.
 
 ### Keepalive
 

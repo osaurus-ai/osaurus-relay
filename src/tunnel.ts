@@ -1,4 +1,10 @@
 import { generateNonce, verifyAgent, verifyAuth } from "./auth.ts";
+import {
+  handleStreamChunk,
+  handleStreamEnd,
+  handleStreamStart,
+  teardownStreaming,
+} from "./relay.ts";
 import { recordTunnelConnect } from "./stats.ts";
 import type {
   AddAgentFrame,
@@ -7,6 +13,7 @@ import type {
   PendingRequest,
   RemoveAgentFrame,
   ResponseFrame,
+  StreamingRequest,
   TunnelConnection,
 } from "./types.ts";
 
@@ -70,6 +77,7 @@ function teardown(conn: TunnelConnection): void {
     });
   }
   conn.pending.clear();
+  teardownStreaming(conn);
   conn.agents.clear();
   connections.delete(conn.ws);
 }
@@ -179,6 +187,15 @@ function onMessage(conn: TunnelConnection, data: string): void {
     case "response":
       handleResponse(conn, frame);
       break;
+    case "stream_start":
+      handleStreamStart(conn, frame);
+      break;
+    case "stream_chunk":
+      handleStreamChunk(conn, frame);
+      break;
+    case "stream_end":
+      handleStreamEnd(conn, frame);
+      break;
     case "add_agent":
       handleAddAgent(conn, frame);
       break;
@@ -200,6 +217,7 @@ export function handleTunnelConnect(req: Request): Response {
     ws: socket,
     agents: new Set(),
     pending: new Map<string, PendingRequest>(),
+    streaming: new Map<string, StreamingRequest>(),
     missedPings: 0,
     keepaliveTimer: 0,
     pendingNonce: null,

@@ -1,4 +1,4 @@
-import { verifyAgent, verifyAuth } from "./auth.ts";
+import { generateNonce, verifyAgent, verifyAuth } from "./auth.ts";
 import { recordTunnelConnect } from "./stats.ts";
 import type {
   AddAgentFrame,
@@ -15,6 +15,7 @@ const KEEPALIVE_INTERVAL_MS = 30_000;
 const MAX_MISSED_PINGS = 3;
 const MAX_AGENTS_PER_TUNNEL = 50;
 const AUTH_TIMEOUT_MS = 10_000;
+const NONCE_EXPIRY_MS = 30_000;
 
 // agent address (lowercase) -> TunnelConnection
 const tunnels = new Map<string, TunnelConnection>();
@@ -52,6 +53,9 @@ function unregisterAgent(conn: TunnelConnection, address: string): void {
 
 function teardown(conn: TunnelConnection): void {
   clearInterval(conn.keepaliveTimer);
+  if (conn.pendingNonceTimer !== null) {
+    clearTimeout(conn.pendingNonceTimer);
+  }
   for (const addr of conn.agents) {
     tunnels.delete(addr);
   }
@@ -105,8 +109,21 @@ async function handleAddAgent(
     return;
   }
 
+  if (!conn.pendingNonce || conn.pendingNonce !== frame.nonce) {
+    conn.ws.send(JSON.stringify({ type: "error", error: "invalid_nonce" }));
+    return;
+  }
+
+  const nonce = conn.pendingNonce;
+  conn.pendingNonce = null;
+  if (conn.pendingNonceTimer !== null) {
+    clearTimeout(conn.pendingNonceTimer);
+    conn.pendingNonceTimer = null;
+  }
+
   const addr = await verifyAgent(
     { address: frame.address, signature: frame.signature },
+    nonce,
     frame.timestamp,
   );
   if (!addr) {
@@ -120,6 +137,21 @@ async function handleAddAgent(
     address: addr,
     url: agentUrl(addr),
   }));
+}
+
+function handleRequestChallenge(conn: TunnelConnection): void {
+  if (conn.pendingNonceTimer !== null) {
+    clearTimeout(conn.pendingNonceTimer);
+  }
+
+  const nonce = generateNonce();
+  conn.pendingNonce = nonce;
+  conn.pendingNonceTimer = setTimeout(() => {
+    conn.pendingNonce = null;
+    conn.pendingNonceTimer = null;
+  }, NONCE_EXPIRY_MS);
+
+  conn.ws.send(JSON.stringify({ type: "challenge", nonce }));
 }
 
 function handleRemoveAgent(
@@ -153,6 +185,9 @@ function onMessage(conn: TunnelConnection, data: string): void {
     case "remove_agent":
       handleRemoveAgent(conn, frame);
       break;
+    case "request_challenge":
+      handleRequestChallenge(conn);
+      break;
     default:
       break;
   }
@@ -167,9 +202,12 @@ export function handleTunnelConnect(req: Request): Response {
     pending: new Map<string, PendingRequest>(),
     missedPings: 0,
     keepaliveTimer: 0,
+    pendingNonce: null,
+    pendingNonceTimer: null,
   };
 
   let authenticated = false;
+  let challengeNonce: string | null = null;
 
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
@@ -180,7 +218,10 @@ export function handleTunnelConnect(req: Request): Response {
     }
   }, AUTH_TIMEOUT_MS);
 
-  socket.onopen = () => {};
+  socket.onopen = () => {
+    challengeNonce = generateNonce();
+    socket.send(JSON.stringify({ type: "challenge", nonce: challengeNonce }));
+  };
 
   socket.onmessage = async (event) => {
     const data = typeof event.data === "string" ? event.data : "";
@@ -202,6 +243,15 @@ export function handleTunnelConnect(req: Request): Response {
         return;
       }
 
+      if (frame.nonce !== challengeNonce) {
+        socket.send(JSON.stringify({ type: "auth_error", error: "invalid_nonce" }));
+        socket.close(4000, "invalid nonce");
+        challengeNonce = null;
+        return;
+      }
+
+      challengeNonce = null;
+
       if (frame.agents.length === 0) {
         socket.send(JSON.stringify({ type: "auth_error", error: "no_agents" }));
         socket.close(4000, "no agents");
@@ -214,7 +264,7 @@ export function handleTunnelConnect(req: Request): Response {
         return;
       }
 
-      const verified = await verifyAuth(frame.agents, frame.timestamp);
+      const verified = await verifyAuth(frame.agents, frame.nonce, frame.timestamp);
       if (!verified) {
         socket.send(JSON.stringify({ type: "auth_error", error: "signature_verification_failed" }));
         socket.close(4001, "auth failed");

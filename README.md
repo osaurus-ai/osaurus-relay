@@ -115,9 +115,17 @@ Open a WebSocket to:
 wss://agent.osaurus.ai/tunnel/connect
 ```
 
-### Authentication
+### Challenge-Response Authentication
 
-The first frame **must** be an `auth` frame. The relay closes the connection if no auth is received within 10 seconds.
+Authentication uses a challenge-response handshake to prevent signature replay attacks. The relay closes the connection if no auth is received within 10 seconds.
+
+**Step 1:** Immediately after the WebSocket opens, the relay sends a `challenge` frame with a single-use 64-character hex nonce:
+
+```json
+{ "type": "challenge", "nonce": "a1b2c3...64 hex chars" }
+```
+
+**Step 2:** The client sends an `auth` frame including the server's nonce:
 
 ```json
 {
@@ -126,6 +134,7 @@ The first frame **must** be an `auth` frame. The relay closes the connection if 
     { "address": "0xAgentAddress1...", "signature": "0x..." },
     { "address": "0xAgentAddress2...", "signature": "0x..." }
   ],
+  "nonce": "a1b2c3...same nonce from challenge",
   "timestamp": 1709136000
 }
 ```
@@ -133,12 +142,12 @@ The first frame **must** be an `auth` frame. The relay closes the connection if 
 Each agent signs the following message with its own secp256k1 private key using EIP-191 `personal_sign`:
 
 ```
-osaurus-tunnel:<agent-address>:<timestamp>
+osaurus-tunnel:<agent-address>:<nonce>:<timestamp>
 ```
 
-`timestamp` is Unix seconds. The relay rejects if it's more than 30 seconds from the server's clock.
+`timestamp` is Unix seconds. The relay rejects if it's more than 30 seconds from the server's clock. The nonce must match the one sent in the `challenge` frame — each nonce is single-use and consumed immediately after verification.
 
-If all signatures verify, the relay responds with:
+**Step 3:** If all signatures verify, the relay responds with:
 
 ```json
 {
@@ -154,17 +163,34 @@ On failure the relay sends `auth_error` and closes the socket:
 
 ```json
 { "type": "auth_error", "error": "signature_verification_failed" }
+{ "type": "auth_error", "error": "invalid_nonce" }
 ```
 
 ### Adding / Removing Agents Mid-Session
 
-Add a new agent without reconnecting:
+Adding an agent mid-session requires a new challenge-response exchange to get a fresh nonce.
+
+**Step 1:** Request a challenge:
 
 ```json
-{ "type": "add_agent", "address": "0xNewAgent...", "signature": "0x...", "timestamp": 1709136030 }
+{ "type": "request_challenge" }
 ```
 
-Response:
+**Step 2:** The relay responds with a new single-use nonce (expires after 30 seconds if unused):
+
+```json
+{ "type": "challenge", "nonce": "d4e5f6...64 hex chars" }
+```
+
+**Step 3:** Send the `add_agent` frame with the nonce:
+
+```json
+{ "type": "add_agent", "address": "0xNewAgent...", "signature": "0x...", "nonce": "d4e5f6...same nonce", "timestamp": 1709136030 }
+```
+
+The signature covers `osaurus-tunnel:<agent-address>:<nonce>:<timestamp>`, same as initial auth.
+
+**Step 4:** Response:
 
 ```json
 { "type": "agent_added", "address": "0xnewagent...", "url": "https://0xnewagent.agent.osaurus.ai" }
@@ -242,6 +268,7 @@ The relay may send error frames for protocol violations:
 ```json
 { "type": "error", "error": "max_agents_reached" }
 { "type": "error", "error": "invalid_signature" }
+{ "type": "error", "error": "invalid_nonce" }
 ```
 
 ### HTTP Error Codes
@@ -273,7 +300,7 @@ Relay-level protections:
 
 - **Rate limiting** — 100 req/min per agent address, 5 tunnel connects/min per IP, 10 stats req/min per IP
 - **Max body size** — 10 MB per request/response frame
-- **Tunnel auth** — secp256k1 signature with 30-second timestamp window
+- **Tunnel auth** — challenge-response handshake with server-issued single-use nonce + secp256k1 signature with 30-second timestamp window (prevents replay attacks)
 - **Connection limit** — 50 agents per tunnel
 
 ## Deploy to Fly.io

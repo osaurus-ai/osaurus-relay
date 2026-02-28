@@ -15,6 +15,7 @@ export interface AgentInfo {
 export interface AuthFrame {
   type: "auth";
   agents: AgentAuth[];
+  nonce: string;
   timestamp: number;
 }
 
@@ -22,6 +23,7 @@ export interface AddAgentFrame {
   type: "add_agent";
   address: string;
   signature: string;
+  nonce: string;
   timestamp: number;
 }
 
@@ -43,12 +45,17 @@ export interface ResponseFrame {
   body: string;
 }
 
+export interface RequestChallengeFrame {
+  type: "request_challenge";
+}
+
 export type InboundFrame =
   | AuthFrame
   | AddAgentFrame
   | RemoveAgentFrame
   | PongFrame
-  | ResponseFrame;
+  | ResponseFrame
+  | RequestChallengeFrame;
 
 // --- Outbound frames (relay -> Osaurus client) ---
 
@@ -92,6 +99,11 @@ export interface ErrorFrame {
   error: string;
 }
 
+export interface ChallengeFrame {
+  type: "challenge";
+  nonce: string;
+}
+
 export type OutboundFrame =
   | AuthOkFrame
   | AuthErrorFrame
@@ -99,7 +111,8 @@ export type OutboundFrame =
   | AgentRemovedFrame
   | PingFrame
   | RequestFrame
-  | ErrorFrame;
+  | ErrorFrame
+  | ChallengeFrame;
 
 // --- Pending request tracking ---
 
@@ -116,4 +129,6 @@ export interface TunnelConnection {
   pending: Map<string, PendingRequest>;
   missedPings: number;
   keepaliveTimer: number;
+  pendingNonce: string | null;
+  pendingNonceTimer: number | null;
 }

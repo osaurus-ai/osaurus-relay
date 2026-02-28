@@ -9,10 +9,11 @@
  * What it does:
  *   1. Generates a random secp256k1 keypair
  *   2. Connects a WebSocket tunnel to the relay
- *   3. Sends an auth frame with a signed agent
- *   4. Waits for auth_ok and prints the agent's public URL
- *   5. Echoes back any requests that come through the tunnel
- *   6. Press Ctrl+C to disconnect
+ *   3. Waits for the server challenge nonce
+ *   4. Signs and sends an auth frame with the server nonce
+ *   5. Waits for auth_ok and prints the agent's public URL
+ *   6. Echoes back any requests that come through the tunnel
+ *   7. Press Ctrl+C to disconnect
  */
 
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
@@ -28,25 +29,31 @@ console.log(`Agent address: ${account.address}`);
 console.log(`Connecting to: ${WS_URL}`);
 console.log();
 
-const timestamp = Math.floor(Date.now() / 1000);
-const message = `osaurus-tunnel:${account.address}:${timestamp}`;
-const signature = await account.signMessage({ message });
-
 const ws = new WebSocket(WS_URL);
 
 ws.onopen = () => {
-  console.log("WebSocket connected, sending auth...");
-  ws.send(JSON.stringify({
-    type: "auth",
-    agents: [{ address: account.address, signature }],
-    timestamp,
-  }));
+  console.log("WebSocket connected, waiting for challenge...");
 };
 
-ws.onmessage = (event) => {
+ws.onmessage = async (event) => {
   const frame = JSON.parse(event.data);
 
   switch (frame.type) {
+    case "challenge": {
+      console.log("Received challenge, sending auth...");
+      const timestamp = Math.floor(Date.now() / 1000);
+      const nonce = frame.nonce as string;
+      const message = `osaurus-tunnel:${account.address}:${nonce}:${timestamp}`;
+      const signature = await account.signMessage({ message });
+      ws.send(JSON.stringify({
+        type: "auth",
+        agents: [{ address: account.address, signature }],
+        nonce,
+        timestamp,
+      }));
+      break;
+    }
+
     case "auth_ok":
       console.log("Authenticated!");
       console.log();

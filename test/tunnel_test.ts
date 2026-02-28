@@ -17,9 +17,42 @@ function mockInfo(): Deno.ServeHandlerInfo {
   };
 }
 
-async function signForTunnel(address: string, timestamp: number): Promise<string> {
-  const message = `osaurus-tunnel:${address}:${timestamp}`;
+async function signForTunnel(address: string, nonce: string, timestamp: number): Promise<string> {
+  const message = `osaurus-tunnel:${address}:${nonce}:${timestamp}`;
   return await account.signMessage({ message });
+}
+
+function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    ws.onmessage = (e) => resolve(JSON.parse(e.data));
+  });
+}
+
+async function connectAndAuth(port: number): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = (e) => reject(e);
+  });
+
+  const challenge = await waitForMessage(ws);
+  assertEquals(challenge.type, "challenge");
+  const nonce = challenge.nonce as string;
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const sig = await signForTunnel(account.address, nonce, timestamp);
+
+  ws.send(JSON.stringify({
+    type: "auth",
+    agents: [{ address: account.address, signature: sig }],
+    nonce,
+    timestamp,
+  }));
+
+  const authResp = await waitForMessage(ws);
+  assertEquals(authResp.type, "auth_ok");
+
+  return { ws, authResp };
 }
 
 Deno.test({
@@ -30,27 +63,8 @@ Deno.test({
     const port = nextPort();
     const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const sig = await signForTunnel(account.address, timestamp);
+    const { ws } = await connectAndAuth(port);
 
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
-    await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      ws.onerror = (e) => reject(e);
-    });
-
-    ws.send(JSON.stringify({
-      type: "auth",
-      agents: [{ address: account.address, signature: sig }],
-      timestamp,
-    }));
-
-    const authResponse = await new Promise<Record<string, unknown>>((resolve) => {
-      ws.onmessage = (e) => resolve(JSON.parse(e.data));
-    });
-    assertEquals(authResponse.type, "auth_ok");
-
-    // Set up echo responder
     ws.onmessage = (e) => {
       const frame = JSON.parse(e.data);
       if (frame.type === "request") {
@@ -64,7 +78,6 @@ Deno.test({
       }
     };
 
-    // Test relay by calling handleRequest directly with proper Host header
     const agentAddr = account.address.toLowerCase();
     const resp = await handleRequest(
       new Request("http://localhost/chat", {
@@ -83,11 +96,9 @@ Deno.test({
     assertEquals(body.echo, true);
     assertEquals(body.path, "/chat");
 
-    // Disconnect
     ws.close();
     await new Promise((r) => setTimeout(r, 200));
 
-    // After disconnect, agent should be offline
     const resp2 = await handleRequest(
       new Request("http://localhost/chat", {
         headers: { host: `${agentAddr}.agent.osaurus.ai` },
@@ -109,27 +120,8 @@ Deno.test({
     const port = nextPort();
     const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const sig = await signForTunnel(account.address, timestamp);
+    const { ws } = await connectAndAuth(port);
 
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
-    await new Promise<void>((resolve, reject) => {
-      ws.onopen = () => resolve();
-      ws.onerror = (e) => reject(e);
-    });
-
-    ws.send(JSON.stringify({
-      type: "auth",
-      agents: [{ address: account.address, signature: sig }],
-      timestamp,
-    }));
-
-    const authResp = await new Promise<Record<string, unknown>>((resolve) => {
-      ws.onmessage = (e) => resolve(JSON.parse(e.data));
-    });
-    assertEquals(authResp.type, "auth_ok");
-
-    // Remove agent
     const messages: Record<string, unknown>[] = [];
     ws.onmessage = (e) => messages.push(JSON.parse(e.data));
 
@@ -142,7 +134,6 @@ Deno.test({
     const removeMsg = messages.find((m) => m.type === "agent_removed");
     assertEquals(removeMsg?.type, "agent_removed");
 
-    // Agent should be offline now
     const agentAddr = account.address.toLowerCase();
     const resp = await handleRequest(
       new Request("http://localhost/chat", {
@@ -155,6 +146,79 @@ Deno.test({
 
     ws.close();
     await new Promise((r) => setTimeout(r, 100));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - wrong nonce rejected",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = (e) => reject(e);
+    });
+
+    const challenge = await waitForMessage(ws);
+    assertEquals(challenge.type, "challenge");
+
+    const fakeNonce = "a".repeat(64);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sig = await signForTunnel(account.address, fakeNonce, timestamp);
+
+    ws.send(JSON.stringify({
+      type: "auth",
+      agents: [{ address: account.address, signature: sig }],
+      nonce: fakeNonce,
+      timestamp,
+    }));
+
+    const resp = await waitForMessage(ws);
+    assertEquals(resp.type, "auth_error");
+    assertEquals(resp.error, "invalid_nonce");
+
+    await new Promise((r) => setTimeout(r, 200));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - add agent mid-session with request_challenge",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const { ws } = await connectAndAuth(port);
+
+    ws.send(JSON.stringify({ type: "request_challenge" }));
+    const challenge = await waitForMessage(ws);
+    assertEquals(challenge.type, "challenge");
+    const nonce = challenge.nonce as string;
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sig = await signForTunnel(account.address, nonce, timestamp);
+
+    ws.send(JSON.stringify({
+      type: "add_agent",
+      address: account.address,
+      signature: sig,
+      nonce,
+      timestamp,
+    }));
+
+    const addResp = await waitForMessage(ws);
+    assertEquals(addResp.type, "agent_added");
+    assertEquals(addResp.address, account.address.toLowerCase());
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 200));
     await server.shutdown();
   },
 });

@@ -42,15 +42,17 @@ The server starts on port `8080` by default. Override with the `PORT` environmen
 osaurus-relay/
 ├── main.ts              # Entry point — Deno.serve() HTTP server
 ├── src/
-│   ├── router.ts        # HTTP routing: health, tunnel connect, subdomain relay
+│   ├── router.ts        # HTTP routing: health, stats, tunnel connect, subdomain relay
 │   ├── tunnel.ts        # WebSocket tunnel lifecycle + keepalive
 │   ├── relay.ts         # HTTP-to-WS request multiplexing + timeout
 │   ├── auth.ts          # secp256k1 signature verification via viem
 │   ├── rate_limit.ts    # Token bucket rate limiter (per-IP and per-agent)
+│   ├── stats.ts         # Aggregate analytics counters
 │   └── types.ts         # All frame/message TypeScript types
 ├── test/
 │   ├── auth_test.ts     # Signature verification tests
 │   ├── rate_limit_test.ts
+│   ├── stats_test.ts    # Analytics endpoint + counter tests
 │   ├── tunnel_test.ts   # Tunnel connect/disconnect/multi-agent tests
 │   └── relay_test.ts    # Request forwarding tests
 ├── Dockerfile           # Deno container for Fly.io
@@ -67,6 +69,22 @@ Health check. Returns `200 OK` with:
 ```json
 { "status": "ok", "tunnels": 42 }
 ```
+
+### `GET /stats`
+
+Aggregate analytics. Returns `200 OK` with:
+
+```json
+{
+  "uptime_seconds": 12345,
+  "active_tunnels": 3,
+  "active_agents": 7,
+  "total_requests_relayed": 1042,
+  "total_tunnel_connections": 15
+}
+```
+
+Rate-limited to 10 requests/min per IP.
 
 ### `WSS /tunnel/connect`
 
@@ -242,6 +260,7 @@ Callers hitting agent subdomains may receive these relay-level errors:
 | Scope              | Limit                     |
 | ------------------ | ------------------------- |
 | Tunnel connections | 5/min per IP              |
+| Stats endpoint     | 10/min per IP             |
 | Inbound requests   | 100/min per agent address |
 | Agents per tunnel  | 50 max                    |
 | Request body size  | 10 MB max                 |
@@ -252,7 +271,7 @@ The relay is a **transparent proxy**. It does not authenticate public traffic �
 
 Relay-level protections:
 
-- **Rate limiting** — 100 req/min per agent address, 5 tunnel connects/min per IP
+- **Rate limiting** — 100 req/min per agent address, 5 tunnel connects/min per IP, 10 stats req/min per IP
 - **Max body size** — 10 MB per request/response frame
 - **Tunnel auth** — secp256k1 signature with 30-second timestamp window
 - **Connection limit** — 50 agents per tunnel

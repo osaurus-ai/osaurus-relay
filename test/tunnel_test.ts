@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { privateKeyToAccount } from "viem/accounts";
 import { handleRequest } from "../src/router.ts";
+import { tunnelLimiter } from "../src/rate_limit.ts";
 
 const TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const account = privateKeyToAccount(TEST_KEY);
@@ -26,6 +27,11 @@ function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     ws.onmessage = (e) => resolve(JSON.parse(e.data));
   });
+}
+
+function resetRateLimiter(): void {
+  // deno-lint-ignore no-explicit-any
+  (tunnelLimiter as any).buckets.clear();
 }
 
 async function connectAndAuth(port: number): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
@@ -218,6 +224,158 @@ Deno.test({
     assertEquals(addResp.address, account.address.toLowerCase());
 
     ws.close();
+    await new Promise((r) => setTimeout(r, 200));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - duplicate agent address rejected at auth",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const { ws: ws1 } = await connectAndAuth(port);
+
+    ws1.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      if (frame.type === "request") {
+        ws1.send(JSON.stringify({
+          type: "response",
+          id: frame.id,
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ from: "first" }),
+        }));
+      }
+    };
+
+    const { ws: ws2, authResp } = await connectAndAuth(port);
+    const rejected = authResp.rejected as { address: string; reason: string }[] | undefined;
+    assertEquals(Array.isArray(rejected), true);
+    assertEquals(rejected!.length, 1);
+    assertEquals(rejected![0].reason, "already_registered");
+
+    const agentAddr = account.address.toLowerCase();
+    const resp = await handleRequest(
+      new Request("http://localhost/chat", {
+        method: "POST",
+        headers: {
+          host: `${agentAddr}.agent.osaurus.ai`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ message: "hello" }),
+      }),
+      mockInfo(),
+    );
+
+    assertEquals(resp.status, 200);
+    const body = await resp.json();
+    assertEquals(body.from, "first");
+
+    ws1.close();
+    ws2.close();
+    await new Promise((r) => setTimeout(r, 200));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - add_agent rejected when address already registered by another connection",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const { ws: ws1 } = await connectAndAuth(port);
+
+    const { ws: ws2 } = await connectAndAuth(port);
+
+    ws2.send(JSON.stringify({ type: "request_challenge" }));
+    const challenge = await waitForMessage(ws2);
+    assertEquals(challenge.type, "challenge");
+    const nonce = challenge.nonce as string;
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sig = await signForTunnel(account.address, nonce, timestamp);
+
+    ws2.send(JSON.stringify({
+      type: "add_agent",
+      address: account.address,
+      signature: sig,
+      nonce,
+      timestamp,
+    }));
+
+    const addResp = await waitForMessage(ws2);
+    assertEquals(addResp.type, "error");
+    assertEquals(addResp.error, "address_already_registered");
+
+    ws1.close();
+    ws2.close();
+    await new Promise((r) => setTimeout(r, 200));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - teardown of old connection does not corrupt new connection's tunnel entry",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const { ws: ws1 } = await connectAndAuth(port);
+
+    ws1.send(JSON.stringify({
+      type: "remove_agent",
+      address: account.address,
+    }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    const { ws: ws2 } = await connectAndAuth(port);
+
+    ws2.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      if (frame.type === "request") {
+        ws2.send(JSON.stringify({
+          type: "response",
+          id: frame.id,
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ from: "second" }),
+        }));
+      }
+    };
+
+    ws1.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    const agentAddr = account.address.toLowerCase();
+    const resp = await handleRequest(
+      new Request("http://localhost/chat", {
+        method: "POST",
+        headers: {
+          host: `${agentAddr}.agent.osaurus.ai`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ message: "hello" }),
+      }),
+      mockInfo(),
+    );
+
+    assertEquals(resp.status, 200);
+    const body = await resp.json();
+    assertEquals(body.from, "second");
+
+    ws2.close();
     await new Promise((r) => setTimeout(r, 200));
     await server.shutdown();
   },

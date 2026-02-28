@@ -46,16 +46,23 @@ function agentUrl(address: string): string {
   return `https://${address}.${BASE_DOMAIN}`;
 }
 
-function registerAgent(conn: TunnelConnection, address: string): void {
+function registerAgent(conn: TunnelConnection, address: string): boolean {
   const lower = address.toLowerCase();
+  const existing = tunnels.get(lower);
+  if (existing && existing !== conn) {
+    return false;
+  }
   conn.agents.add(lower);
   tunnels.set(lower, conn);
+  return true;
 }
 
 function unregisterAgent(conn: TunnelConnection, address: string): void {
   const lower = address.toLowerCase();
   conn.agents.delete(lower);
-  tunnels.delete(lower);
+  if (tunnels.get(lower) === conn) {
+    tunnels.delete(lower);
+  }
 }
 
 function teardown(conn: TunnelConnection): void {
@@ -64,7 +71,9 @@ function teardown(conn: TunnelConnection): void {
     clearTimeout(conn.pendingNonceTimer);
   }
   for (const addr of conn.agents) {
-    tunnels.delete(addr);
+    if (tunnels.get(addr) === conn) {
+      tunnels.delete(addr);
+    }
   }
   for (const [, pending] of conn.pending) {
     clearTimeout(pending.timer);
@@ -139,7 +148,11 @@ async function handleAddAgent(
     return;
   }
 
-  registerAgent(conn, addr);
+  if (!registerAgent(conn, addr)) {
+    conn.ws.send(JSON.stringify({ type: "error", error: "address_already_registered" }));
+    return;
+  }
+
   conn.ws.send(JSON.stringify({
     type: "agent_added",
     address: addr,
@@ -294,16 +307,25 @@ export function handleTunnelConnect(req: Request): Response {
       connections.set(socket, conn);
       recordTunnelConnect();
 
+      const registered: string[] = [];
+      const rejected: string[] = [];
       for (const addr of verified) {
-        registerAgent(conn, addr);
+        if (registerAgent(conn, addr)) {
+          registered.push(addr);
+        } else {
+          rejected.push(addr);
+        }
       }
 
       socket.send(JSON.stringify({
         type: "auth_ok",
-        agents: verified.map((addr) => ({
+        agents: registered.map((addr) => ({
           address: addr,
           url: agentUrl(addr),
         })),
+        rejected: rejected.length > 0
+          ? rejected.map((addr) => ({ address: addr, reason: "already_registered" }))
+          : undefined,
       }));
 
       startKeepalive(conn);

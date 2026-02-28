@@ -83,6 +83,7 @@ export type InboundFrame =
 export interface AuthOkFrame {
   type: "auth_ok";
   agents: AgentInfo[];
+  rejected?: { address: string; reason: string }[];
 }
 
 export interface AuthErrorFrame {

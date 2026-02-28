@@ -1,0 +1,21 @@
+# Deno
+node_modules/
+.deno/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fly.io
+.fly/
+
+# Environment
+.env
+.env.local

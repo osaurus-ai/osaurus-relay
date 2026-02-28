@@ -1,4 +1,5 @@
 import { getTunnelForAgent } from "./tunnel.ts";
+import { recordRequest } from "./stats.ts";
 import type { ResponseFrame, TunnelConnection } from "./types.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -20,6 +21,8 @@ export async function relayRequest(
   if (!conn) {
     return jsonResponse(502, { error: "agent_offline" });
   }
+
+  recordRequest();
 
   const contentLength = req.headers.get("content-length");
   if (contentLength && parseInt(contentLength) > MAX_BODY_BYTES) {

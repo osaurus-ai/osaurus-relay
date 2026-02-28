@@ -1,4 +1,5 @@
 import { verifyAgent, verifyAuth } from "./auth.ts";
+import { recordTunnelConnect } from "./stats.ts";
 import type {
   AddAgentFrame,
   AuthFrame,
@@ -23,6 +24,10 @@ const connections = new Map<WebSocket, TunnelConnection>();
 
 export function getActiveTunnelCount(): number {
   return connections.size;
+}
+
+export function getActiveAgentCount(): number {
+  return tunnels.size;
 }
 
 export function getTunnelForAgent(address: string): TunnelConnection | undefined {
@@ -219,6 +224,7 @@ export function handleTunnelConnect(req: Request): Response {
       clearTimeout(authTimeout);
       authenticated = true;
       connections.set(socket, conn);
+      recordTunnelConnect();
 
       for (const addr of verified) {
         registerAgent(conn, addr);

@@ -1,6 +1,7 @@
 import { getActiveTunnelCount, handleTunnelConnect } from "./tunnel.ts";
 import { relayRequest } from "./relay.ts";
-import { requestLimiter, tunnelLimiter } from "./rate_limit.ts";
+import { requestLimiter, statsLimiter, tunnelLimiter } from "./rate_limit.ts";
+import { getStats } from "./stats.ts";
 
 const BASE_DOMAIN = Deno.env.get("BASE_DOMAIN") ?? "agent.osaurus.ai";
 const AGENT_ADDRESS_RE = /^0x[0-9a-f]{40}$/i;
@@ -46,6 +47,14 @@ export function handleRequest(
       status: "ok",
       tunnels: getActiveTunnelCount(),
     });
+  }
+
+  // Analytics — aggregate stats, rate-limited per IP
+  if (url.pathname === "/stats") {
+    if (!statsLimiter.allow(clientIp)) {
+      return jsonResponse(429, { error: "rate_limited" });
+    }
+    return jsonResponse(200, getStats());
   }
 
   // Tunnel connect — on the bare domain

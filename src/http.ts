@@ -82,7 +82,6 @@ export function sanitizeResponseHeaders(
 const STRIPPED_REQUEST_HEADERS = new Set([
   "host",
   "cookie",
-  "authorization",
   "proxy-authorization",
   "x-forwarded-proto",
   "x-forwarded-host",

@@ -45,6 +45,7 @@ osaurus-relay/
 │   ├── router.ts        # HTTP routing: health, stats, tunnel connect, subdomain relay
 │   ├── tunnel.ts        # WebSocket tunnel lifecycle + keepalive
 │   ├── relay.ts         # HTTP-to-WS request multiplexing + timeout
+│   ├── http.ts          # Shared HTTP helpers: JSON responses, CORS, header sanitization
 │   ├── auth.ts          # secp256k1 signature verification via viem
 │   ├── rate_limit.ts    # Token bucket rate limiter (per-IP and per-agent)
 │   ├── stats.ts         # Aggregate analytics counters
@@ -95,7 +96,9 @@ Agents can be added or removed mid-session without reconnecting.
 
 ### `ANY https://0x<agent>.agent.osaurus.ai/*`
 
-Public traffic to an agent's subdomain is relayed through the user's tunnel. The relay injects `X-Agent-Address` and `X-Forwarded-For` headers. The Osaurus instance handles its own authentication — the relay is a transparent proxy.
+Public traffic to an agent's subdomain is relayed through the user's tunnel. The relay injects `X-Agent-Address` and `X-Forwarded-For` headers. Infrastructure headers (`fly-*`, `cf-*`) and sensitive caller headers (`cookie`) are stripped before forwarding; `authorization` is passed through for Osaurus client authentication. The Osaurus instance handles its own authentication — the relay is a transparent proxy.
+
+All agent subdomain responses include `Access-Control-Allow-Origin: *`. Preflight `OPTIONS` requests return `204` with appropriate CORS headers.
 
 ## Configuration
 
@@ -295,22 +298,26 @@ The relay may send error frames for protocol violations:
 
 Callers hitting agent subdomains may receive these relay-level errors:
 
-| Status | Body                            | Meaning                                |
-| ------ | ------------------------------- | -------------------------------------- |
-| 400    | `{"error":"invalid_subdomain"}` | Subdomain is not a valid agent address |
-| 429    | `{"error":"rate_limited"}`      | Too many requests to this agent        |
-| 502    | `{"error":"agent_offline"}`     | No active tunnel for this agent        |
-| 504    | `{"error":"gateway_timeout"}`   | Agent didn't respond within 30 seconds |
+| Status | Body                                | Meaning                                    |
+| ------ | ----------------------------------- | ------------------------------------------ |
+| 400    | `{"error":"invalid_subdomain"}`     | Subdomain is not a valid agent address     |
+| 413    | `{"error":"body_too_large"}`        | Request body exceeds 10 MB                 |
+| 429    | `{"error":"rate_limited"}`          | Too many requests to this agent            |
+| 429    | `{"error":"too_many_connections"}`  | IP has too many open tunnels (max 10)      |
+| 502    | `{"error":"agent_offline"}`         | No active tunnel for this agent            |
+| 502    | `{"error":"tunnel_send_failed"}`    | Failed to send request through the tunnel  |
+| 504    | `{"error":"gateway_timeout"}`       | Agent didn't respond within 30 seconds     |
 
 ### Rate Limits
 
-| Scope              | Limit                     |
-| ------------------ | ------------------------- |
-| Tunnel connections | 5/min per IP              |
-| Stats endpoint     | 10/min per IP             |
-| Inbound requests   | 100/min per agent address |
-| Agents per tunnel  | 50 max                    |
-| Request body size  | 10 MB max                 |
+| Scope                      | Limit                     |
+| -------------------------- | ------------------------- |
+| Tunnel connections         | 5/min per IP              |
+| Concurrent tunnels per IP  | 10 max                    |
+| Stats endpoint             | 10/min per IP             |
+| Inbound requests           | 100/min per agent address |
+| Agents per tunnel          | 50 max                    |
+| Request body size          | 10 MB max (streaming read with early abort) |
 
 ## Security Model
 
@@ -318,10 +325,15 @@ The relay is a **transparent proxy**. It does not authenticate public traffic �
 
 Relay-level protections:
 
+- **IP detection** — uses `fly-client-ip` (set by Fly.io edge, not spoofable) over `x-forwarded-for` for all rate limiting and forwarding
 - **Rate limiting** — 100 req/min per agent address, 5 tunnel connects/min per IP, 10 stats req/min per IP
-- **Max body size** — 10 MB per request/response frame
+- **Concurrent connection limit** — max 10 open WebSocket tunnels per IP
+- **Max body size** — 10 MB per request, enforced via streaming read with early abort (prevents memory exhaustion from chunked-encoding attacks that omit `content-length`)
 - **Tunnel auth** — challenge-response handshake with server-issued single-use nonce + secp256k1 signature with 30-second timestamp window (prevents replay attacks)
 - **Connection limit** — 50 agents per tunnel
+- **Response header sanitization** — hop-by-hop headers (`transfer-encoding`, `connection`, `keep-alive`, `upgrade`, etc.) are stripped from response frames before constructing the HTTP response
+- **Request header sanitization** — infrastructure headers (`fly-*`, `cf-*`) and sensitive caller headers (`cookie`, `proxy-authorization`) are stripped before forwarding to the Osaurus client; `authorization` is forwarded since Osaurus clients use bearer tokens for their own authentication
+- **CORS** — agent subdomain responses include `Access-Control-Allow-Origin: *`; preflight `OPTIONS` are handled at the router level
 
 ## Deploy to Fly.io
 
@@ -329,6 +341,8 @@ Relay-level protections:
 fly launch
 fly deploy
 ```
+
+The `fly.toml` is configured with `auto_stop_machines = 'off'` and `min_machines_running = 1` to keep at least one machine always running — idle shutdown would kill all active WebSocket tunnels.
 
 DNS setup:
 

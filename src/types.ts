@@ -155,6 +155,7 @@ export interface StreamingRequest {
 
 export interface TunnelConnection {
   ws: WebSocket;
+  clientIp: string;
   agents: Set<string>;
   pending: Map<string, PendingRequest>;
   streaming: Map<string, StreamingRequest>;

@@ -1,4 +1,5 @@
 import { generateNonce, verifyAgent, verifyAuth } from "./auth.ts";
+import { jsonResponse } from "./http.ts";
 import {
   handleStreamChunk,
   handleStreamEnd,
@@ -23,12 +24,16 @@ const MAX_MISSED_PINGS = 3;
 const MAX_AGENTS_PER_TUNNEL = 50;
 const AUTH_TIMEOUT_MS = 10_000;
 const NONCE_EXPIRY_MS = 30_000;
+const MAX_CONNECTIONS_PER_IP = 10;
 
 // agent address (lowercase) -> TunnelConnection
 const tunnels = new Map<string, TunnelConnection>();
 
 // ws -> TunnelConnection (for cleanup and message routing)
 const connections = new Map<WebSocket, TunnelConnection>();
+
+// client IP -> number of active connections
+const ipConnectionCount = new Map<string, number>();
 
 export function getActiveTunnelCount(): number {
   return connections.size;
@@ -44,6 +49,10 @@ export function getTunnelForAgent(address: string): TunnelConnection | undefined
 
 function agentUrl(address: string): string {
   return `https://${address}.${BASE_DOMAIN}`;
+}
+
+function send(ws: WebSocket, frame: Record<string, unknown>): void {
+  ws.send(JSON.stringify(frame));
 }
 
 function registerAgent(conn: TunnelConnection, address: string): boolean {
@@ -89,6 +98,13 @@ function teardown(conn: TunnelConnection): void {
   teardownStreaming(conn);
   conn.agents.clear();
   connections.delete(conn.ws);
+
+  const count = ipConnectionCount.get(conn.clientIp) ?? 0;
+  if (count <= 1) {
+    ipConnectionCount.delete(conn.clientIp);
+  } else {
+    ipConnectionCount.set(conn.clientIp, count - 1);
+  }
 }
 
 function startKeepalive(conn: TunnelConnection): void {
@@ -102,7 +118,7 @@ function startKeepalive(conn: TunnelConnection): void {
     }
     conn.missedPings++;
     try {
-      conn.ws.send(JSON.stringify({ type: "ping", ts: Math.floor(Date.now() / 1000) }));
+      send(conn.ws, { type: "ping", ts: Math.floor(Date.now() / 1000) });
     } catch {
       teardown(conn);
     }
@@ -122,12 +138,12 @@ async function handleAddAgent(
   frame: AddAgentFrame,
 ): Promise<void> {
   if (conn.agents.size >= MAX_AGENTS_PER_TUNNEL) {
-    conn.ws.send(JSON.stringify({ type: "error", error: "max_agents_reached" }));
+    send(conn.ws, { type: "error", error: "max_agents_reached" });
     return;
   }
 
   if (!conn.pendingNonce || conn.pendingNonce !== frame.nonce) {
-    conn.ws.send(JSON.stringify({ type: "error", error: "invalid_nonce" }));
+    send(conn.ws, { type: "error", error: "invalid_nonce" });
     return;
   }
 
@@ -144,20 +160,16 @@ async function handleAddAgent(
     frame.timestamp,
   );
   if (!addr) {
-    conn.ws.send(JSON.stringify({ type: "error", error: "invalid_signature" }));
+    send(conn.ws, { type: "error", error: "invalid_signature" });
     return;
   }
 
   if (!registerAgent(conn, addr)) {
-    conn.ws.send(JSON.stringify({ type: "error", error: "address_already_registered" }));
+    send(conn.ws, { type: "error", error: "address_already_registered" });
     return;
   }
 
-  conn.ws.send(JSON.stringify({
-    type: "agent_added",
-    address: addr,
-    url: agentUrl(addr),
-  }));
+  send(conn.ws, { type: "agent_added", address: addr, url: agentUrl(addr) });
 }
 
 function handleRequestChallenge(conn: TunnelConnection): void {
@@ -172,7 +184,7 @@ function handleRequestChallenge(conn: TunnelConnection): void {
     conn.pendingNonceTimer = null;
   }, NONCE_EXPIRY_MS);
 
-  conn.ws.send(JSON.stringify({ type: "challenge", nonce }));
+  send(conn.ws, { type: "challenge", nonce });
 }
 
 function handleRemoveAgent(
@@ -182,7 +194,7 @@ function handleRemoveAgent(
   const lower = frame.address.toLowerCase();
   if (!conn.agents.has(lower)) return;
   unregisterAgent(conn, lower);
-  conn.ws.send(JSON.stringify({ type: "agent_removed", address: lower }));
+  send(conn.ws, { type: "agent_removed", address: lower });
 }
 
 function onMessage(conn: TunnelConnection, data: string): void {
@@ -223,11 +235,17 @@ function onMessage(conn: TunnelConnection, data: string): void {
   }
 }
 
-export function handleTunnelConnect(req: Request): Response {
+export function handleTunnelConnect(req: Request, clientIp: string): Response {
+  const currentCount = ipConnectionCount.get(clientIp) ?? 0;
+  if (currentCount >= MAX_CONNECTIONS_PER_IP) {
+    return jsonResponse(429, { error: "too_many_connections" });
+  }
+
   const { socket, response } = Deno.upgradeWebSocket(req);
 
   const conn: TunnelConnection = {
     ws: socket,
+    clientIp,
     agents: new Set(),
     pending: new Map<string, PendingRequest>(),
     streaming: new Map<string, StreamingRequest>(),
@@ -243,7 +261,7 @@ export function handleTunnelConnect(req: Request): Response {
   const authTimeout = setTimeout(() => {
     if (!authenticated) {
       try {
-        socket.send(JSON.stringify({ type: "auth_error", error: "auth_timeout" }));
+        send(socket, { type: "auth_error", error: "auth_timeout" });
         socket.close(4001, "auth timeout");
       } catch { /* socket may not be open yet */ }
     }
@@ -251,7 +269,7 @@ export function handleTunnelConnect(req: Request): Response {
 
   socket.onopen = () => {
     challengeNonce = generateNonce();
-    socket.send(JSON.stringify({ type: "challenge", nonce: challengeNonce }));
+    send(socket, { type: "challenge", nonce: challengeNonce });
   };
 
   socket.onmessage = async (event) => {
@@ -263,19 +281,19 @@ export function handleTunnelConnect(req: Request): Response {
       try {
         frame = JSON.parse(data);
       } catch {
-        socket.send(JSON.stringify({ type: "auth_error", error: "invalid_json" }));
+        send(socket, { type: "auth_error", error: "invalid_json" });
         socket.close(4000, "invalid json");
         return;
       }
 
       if (frame.type !== "auth" || !Array.isArray(frame.agents) || !frame.timestamp) {
-        socket.send(JSON.stringify({ type: "auth_error", error: "expected_auth_frame" }));
+        send(socket, { type: "auth_error", error: "expected_auth_frame" });
         socket.close(4000, "expected auth frame");
         return;
       }
 
       if (frame.nonce !== challengeNonce) {
-        socket.send(JSON.stringify({ type: "auth_error", error: "invalid_nonce" }));
+        send(socket, { type: "auth_error", error: "invalid_nonce" });
         socket.close(4000, "invalid nonce");
         challengeNonce = null;
         return;
@@ -284,20 +302,20 @@ export function handleTunnelConnect(req: Request): Response {
       challengeNonce = null;
 
       if (frame.agents.length === 0) {
-        socket.send(JSON.stringify({ type: "auth_error", error: "no_agents" }));
+        send(socket, { type: "auth_error", error: "no_agents" });
         socket.close(4000, "no agents");
         return;
       }
 
       if (frame.agents.length > MAX_AGENTS_PER_TUNNEL) {
-        socket.send(JSON.stringify({ type: "auth_error", error: "too_many_agents" }));
+        send(socket, { type: "auth_error", error: "too_many_agents" });
         socket.close(4000, "too many agents");
         return;
       }
 
       const verified = await verifyAuth(frame.agents, frame.nonce, frame.timestamp);
       if (!verified) {
-        socket.send(JSON.stringify({ type: "auth_error", error: "signature_verification_failed" }));
+        send(socket, { type: "auth_error", error: "signature_verification_failed" });
         socket.close(4001, "auth failed");
         return;
       }
@@ -305,6 +323,7 @@ export function handleTunnelConnect(req: Request): Response {
       clearTimeout(authTimeout);
       authenticated = true;
       connections.set(socket, conn);
+      ipConnectionCount.set(clientIp, (ipConnectionCount.get(clientIp) ?? 0) + 1);
       recordTunnelConnect();
 
       const registered: string[] = [];
@@ -317,7 +336,7 @@ export function handleTunnelConnect(req: Request): Response {
         }
       }
 
-      socket.send(JSON.stringify({
+      send(socket, {
         type: "auth_ok",
         agents: registered.map((addr) => ({
           address: addr,
@@ -326,7 +345,7 @@ export function handleTunnelConnect(req: Request): Response {
         rejected: rejected.length > 0
           ? rejected.map((addr) => ({ address: addr, reason: "already_registered" }))
           : undefined,
-      }));
+      });
 
       startKeepalive(conn);
       return;

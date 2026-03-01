@@ -1,5 +1,11 @@
 import { getTunnelForAgent } from "./tunnel.ts";
 import { recordRequest } from "./stats.ts";
+import {
+  jsonResponse,
+  readBody,
+  sanitizeRequestHeaders,
+  sanitizeResponseHeaders,
+} from "./http.ts";
 import type {
   ResponseFrame,
   StreamChunkFrame,
@@ -10,16 +16,9 @@ import type {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const STREAM_IDLE_TIMEOUT_MS = 30_000;
-const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 
 const encoder = new TextEncoder();
-
-function jsonResponse(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
 
 export async function relayRequest(
   agentAddress: string,
@@ -38,23 +37,15 @@ export async function relayRequest(
     return jsonResponse(413, { error: "body_too_large" });
   }
 
-  let body = "";
-  if (req.body) {
-    const raw = await req.arrayBuffer();
-    if (raw.byteLength > MAX_BODY_BYTES) {
-      return jsonResponse(413, { error: "body_too_large" });
-    }
-    body = new TextDecoder().decode(raw);
+  const body = await readBody(req, MAX_BODY_BYTES);
+  if (body === null) {
+    return jsonResponse(413, { error: "body_too_large" });
   }
 
   const url = new URL(req.url);
   const id = crypto.randomUUID();
 
-  const headers: Record<string, string> = {};
-  for (const [key, value] of req.headers.entries()) {
-    if (key.toLowerCase() === "host") continue;
-    headers[key.toLowerCase()] = value;
-  }
+  const headers = sanitizeRequestHeaders(req);
   headers["x-agent-address"] = agentAddress;
   headers["x-forwarded-for"] = clientIp;
 
@@ -83,14 +74,10 @@ function sendAndAwait(
 
     conn.pending.set(id, {
       resolve: (resp: ResponseFrame) => {
-        const responseHeaders = new Headers();
-        for (const [key, value] of Object.entries(resp.headers)) {
-          responseHeaders.set(key, value);
-        }
         resolve(
           new Response(resp.body, {
             status: resp.status,
-            headers: responseHeaders,
+            headers: sanitizeResponseHeaders(resp.headers),
           }),
         );
       },
@@ -111,14 +98,10 @@ function sendAndAwait(
 
         conn.streaming.set(id, { controller, timer: idleTimer });
 
-        const responseHeaders = new Headers();
-        for (const [key, value] of Object.entries(resp.headers)) {
-          responseHeaders.set(key, value);
-        }
         resolve(
           new Response(stream, {
             status: resp.status,
-            headers: responseHeaders,
+            headers: sanitizeResponseHeaders(resp.headers),
           }),
         );
       },

@@ -19,7 +19,8 @@
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 
 const BASE_DOMAIN = Deno.args[0] ?? "agent.osaurus.ai";
-const WS_URL = `wss://${BASE_DOMAIN}/tunnel/connect`;
+const isLocal = BASE_DOMAIN.startsWith("localhost") || BASE_DOMAIN.startsWith("127.");
+const WS_URL = `${isLocal ? "ws" : "wss"}://${BASE_DOMAIN}/tunnel/connect`;
 
 const privateKey = generatePrivateKey();
 const account = privateKeyToAccount(privateKey);

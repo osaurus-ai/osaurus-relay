@@ -9,7 +9,8 @@
     "check": "deno check main.ts"
   },
   "imports": {
-    "viem": "npm:viem@^2.28.0"
+    "viem": "npm:viem@^2.28.0",
+    "ioredis": "npm:ioredis@^5"
   },
   "compilerOptions": {
     "strict": true

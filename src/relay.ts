@@ -6,6 +6,7 @@ import {
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
 } from "./http.ts";
+import { FLY_MACHINE_ID, lookupAgentInstance } from "./redis.ts";
 import type {
   ResponseFrame,
   StreamChunkFrame,
@@ -27,6 +28,13 @@ export async function relayRequest(
 ): Promise<Response> {
   const conn = getTunnelForAgent(agentAddress);
   if (!conn) {
+    const machineId = await lookupAgentInstance(agentAddress.toLowerCase());
+    if (machineId && machineId !== FLY_MACHINE_ID) {
+      return new Response(null, {
+        status: 307,
+        headers: { "fly-replay": `instance=${machineId}` },
+      });
+    }
     return jsonResponse(502, { error: "agent_offline" });
   }
 

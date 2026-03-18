@@ -6,6 +6,7 @@ import {
   handleStreamStart,
   teardownStreaming,
 } from "./relay.ts";
+import { claimAgent, refreshAgentsTTL, releaseAgent } from "./redis.ts";
 import { recordTunnelConnect } from "./stats.ts";
 import type {
   AddAgentFrame,
@@ -55,11 +56,14 @@ function send(ws: WebSocket, frame: Record<string, unknown>): void {
   ws.send(JSON.stringify(frame));
 }
 
-function registerAgent(conn: TunnelConnection, address: string): boolean {
+async function registerAgent(conn: TunnelConnection, address: string): Promise<boolean> {
   const lower = address.toLowerCase();
   const existing = tunnels.get(lower);
   if (existing && existing !== conn) {
     return false;
+  }
+  if (!await claimAgent(lower)) {
+    return false; // owned by a different fly instance
   }
   conn.agents.add(lower);
   tunnels.set(lower, conn);
@@ -71,6 +75,7 @@ function unregisterAgent(conn: TunnelConnection, address: string): void {
   conn.agents.delete(lower);
   if (tunnels.get(lower) === conn) {
     tunnels.delete(lower);
+    releaseAgent(lower); // fire-and-forget
   }
 }
 
@@ -82,6 +87,7 @@ function teardown(conn: TunnelConnection): void {
   for (const addr of conn.agents) {
     if (tunnels.get(addr) === conn) {
       tunnels.delete(addr);
+      releaseAgent(addr); // fire-and-forget
     }
   }
   for (const [, pending] of conn.pending) {
@@ -164,7 +170,7 @@ async function handleAddAgent(
     return;
   }
 
-  if (!registerAgent(conn, addr)) {
+  if (!await registerAgent(conn, addr)) {
     send(conn.ws, { type: "error", error: "address_already_registered" });
     return;
   }
@@ -208,6 +214,7 @@ function onMessage(conn: TunnelConnection, data: string): void {
   switch (frame.type) {
     case "pong":
       conn.missedPings = 0;
+      refreshAgentsTTL(conn.agents); // fire-and-forget
       break;
     case "response":
       handleResponse(conn, frame);
@@ -329,7 +336,7 @@ export function handleTunnelConnect(req: Request, clientIp: string): Response {
       const registered: string[] = [];
       const rejected: string[] = [];
       for (const addr of verified) {
-        if (registerAgent(conn, addr)) {
+        if (await registerAgent(conn, addr)) {
           registered.push(addr);
         } else {
           rejected.push(addr);

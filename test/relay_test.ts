@@ -1,6 +1,11 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { privateKeyToAccount } from "viem/accounts";
 import { handleRequest } from "../src/router.ts";
+import { _setClientForTesting, FLY_MACHINE_ID } from "../src/redis.ts";
+import { MockRedis } from "./redis_mock.ts";
+
+// An address never locally registered — used for cross-instance relay tests
+const REMOTE_AGENT = "0x0000000000000000000000000000000000000099";
 
 const TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const account = privateKeyToAccount(TEST_KEY);
@@ -138,5 +143,53 @@ Deno.test({
     assertEquals(respBody.error, "agent_offline");
 
     await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "relay - returns fly-replay header when agent is on a different instance",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const mock = new MockRedis();
+    mock.store.set(`agent:${REMOTE_AGENT}`, { value: "other-machine-id", expiresAt: Infinity });
+    _setClientForTesting(mock);
+
+    const resp = await handleRequest(
+      new Request("http://localhost/chat", {
+        headers: { host: `${REMOTE_AGENT}.agent.osaurus.ai` },
+      }),
+      mockInfo(),
+    );
+
+    assertEquals(resp.status, 307);
+    assertEquals(resp.headers.get("fly-replay"), "instance=other-machine-id");
+    await resp.body?.cancel();
+
+    _setClientForTesting(null);
+  },
+});
+
+Deno.test({
+  name: "relay - returns 502 when stale Redis entry points to this instance",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const mock = new MockRedis();
+    mock.store.set(`agent:${REMOTE_AGENT}`, { value: FLY_MACHINE_ID, expiresAt: Infinity });
+    _setClientForTesting(mock);
+
+    const resp = await handleRequest(
+      new Request("http://localhost/chat", {
+        headers: { host: `${REMOTE_AGENT}.agent.osaurus.ai` },
+      }),
+      mockInfo(),
+    );
+
+    assertEquals(resp.status, 502);
+    const body = await resp.json();
+    assertEquals(body.error, "agent_offline");
+
+    _setClientForTesting(null);
   },
 });

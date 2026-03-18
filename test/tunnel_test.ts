@@ -2,6 +2,8 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { privateKeyToAccount } from "viem/accounts";
 import { handleRequest } from "../src/router.ts";
 import { tunnelLimiter } from "../src/rate_limit.ts";
+import { _setClientForTesting, FLY_MACHINE_ID } from "../src/redis.ts";
+import { MockRedis } from "./redis_mock.ts";
 
 const TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const account = privateKeyToAccount(TEST_KEY);
@@ -377,6 +379,120 @@ Deno.test({
 
     ws2.close();
     await new Promise((r) => setTimeout(r, 200));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - auth rejects agent claimed by a different fly instance",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const mock = new MockRedis();
+    const agentAddr = account.address.toLowerCase();
+    mock.store.set(`agent:${agentAddr}`, { value: "other-machine-id", expiresAt: Infinity });
+    _setClientForTesting(mock);
+
+    const { ws, authResp } = await connectAndAuth(port);
+
+    const rejected = authResp.rejected as { address: string; reason: string }[] | undefined;
+    assertEquals(Array.isArray(rejected), true);
+    assertEquals(rejected!.length, 1);
+    assertEquals(rejected![0].reason, "already_registered");
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 100));
+    _setClientForTesting(null);
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - disconnect releases agent from Redis",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const mock = new MockRedis();
+    _setClientForTesting(mock);
+
+    const { ws } = await connectAndAuth(port);
+
+    const agentAddr = account.address.toLowerCase();
+    assertEquals(mock.store.get(`agent:${agentAddr}`)?.value, FLY_MACHINE_ID);
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    assertEquals(mock.store.has(`agent:${agentAddr}`), false);
+
+    _setClientForTesting(null);
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - remove_agent releases agent from Redis",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const mock = new MockRedis();
+    _setClientForTesting(mock);
+
+    const { ws } = await connectAndAuth(port);
+
+    const agentAddr = account.address.toLowerCase();
+    assertEquals(mock.store.has(`agent:${agentAddr}`), true);
+
+    ws.send(JSON.stringify({ type: "remove_agent", address: account.address }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    assertEquals(mock.store.has(`agent:${agentAddr}`), false);
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 100));
+    _setClientForTesting(null);
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - pong refreshes agent TTLs in Redis",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const mock = new MockRedis();
+    _setClientForTesting(mock);
+
+    const { ws } = await connectAndAuth(port);
+
+    const agentAddr = account.address.toLowerCase();
+    const callsBefore = mock.expireCalls.length;
+
+    ws.send(JSON.stringify({ type: "pong", ts: Math.floor(Date.now() / 1000) }));
+    await new Promise((r) => setTimeout(r, 100));
+
+    const newCalls = mock.expireCalls.slice(callsBefore);
+    assertEquals(newCalls.some((c) => c.key === `agent:${agentAddr}`), true);
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 100));
+    _setClientForTesting(null);
     await server.shutdown();
   },
 });

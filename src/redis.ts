@@ -28,7 +28,7 @@ function agentKey(address: string): string {
 /**
  * Attempt to claim ownership of an agent address for this machine.
  * Returns false if the address is already owned by a different instance.
- * Fails open (returns true) on Redis errors to avoid blocking tunnel setup.
+ * Throws on Redis errors — callers should surface this as an auth failure.
  *
  * SET key value EX ttl NX GET is atomic:
  *   null     → key was newly set (claimed)
@@ -37,19 +37,15 @@ function agentKey(address: string): string {
  */
 export async function claimAgent(address: string): Promise<boolean> {
   if (!client) return true;
-  try {
-    const prev = await client.set(
-      agentKey(address),
-      FLY_MACHINE_ID,
-      "EX",
-      AGENT_TTL_SECONDS,
-      "NX",
-      "GET",
-    );
-    return prev === null || prev === FLY_MACHINE_ID;
-  } catch {
-    return true; // fail open on Redis errors
-  }
+  const prev = await client.set(
+    agentKey(address),
+    FLY_MACHINE_ID,
+    "EX",
+    AGENT_TTL_SECONDS,
+    "NX",
+    "GET",
+  );
+  return prev === null || prev === FLY_MACHINE_ID;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { Redis } from "ioredis";
 import { PairSessionSchema } from "./schemas.ts";
-import type { PairSession } from "./schemas.ts";
+import type { PairSession } from "./types.ts";
 
 const AGENT_TTL_SECONDS = 120;
 
@@ -92,11 +92,21 @@ function pairKey(code: string): string {
   return `pair:${code}`;
 }
 
-export async function setPairSession(code: string, session: PairSession): Promise<void> {
-  await client!.set(pairKey(code), JSON.stringify(session), "EX", PAIR_TTL_SECONDS);
+export async function setPairSession(
+  code: string,
+  session: PairSession,
+): Promise<void> {
+  await client!.set(
+    pairKey(code),
+    JSON.stringify(session),
+    "EX",
+    PAIR_TTL_SECONDS,
+  );
 }
 
-export async function getPairSession(code: string): Promise<PairSession | null> {
+export async function getPairSession(
+  code: string,
+): Promise<PairSession | null> {
   const raw = await client!.get(pairKey(code));
   if (!raw) return null;
   const result = PairSessionSchema.safeParse(JSON.parse(raw));

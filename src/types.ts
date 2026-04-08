@@ -4,6 +4,7 @@ import type {
   AgentAuthSchema,
   AuthFrameSchema,
   InboundFrameSchema,
+  PairSessionSchema,
   PongFrameSchema,
   RemoveAgentFrameSchema,
   RequestChallengeFrameSchema,
@@ -12,6 +13,8 @@ import type {
   StreamEndFrameSchema,
   StreamStartFrameSchema,
 } from "./schemas.ts";
+
+export type PairSession = z.infer<typeof PairSessionSchema>;
 
 // --- Agent types ---
 

@@ -79,3 +79,31 @@ export function refreshAgentsTTL(addresses: Iterable<string>): void {
     client.expire(agentKey(address), AGENT_TTL_SECONDS);
   }
 }
+
+// --- Pair session storage ---
+
+const PAIR_TTL_SECONDS = 300;
+
+export interface PairSession {
+  initiatorAddress: string;
+  state: "pending" | "approved";
+  approverAddress?: string;
+}
+
+function pairKey(code: string): string {
+  return `pair:${code}`;
+}
+
+export async function setPairSession(code: string, session: PairSession): Promise<void> {
+  await client!.set(pairKey(code), JSON.stringify(session), "EX", PAIR_TTL_SECONDS);
+}
+
+export async function getPairSession(code: string): Promise<PairSession | null> {
+  const raw = await client!.get(pairKey(code));
+  if (!raw) return null;
+  return JSON.parse(raw) as PairSession;
+}
+
+export async function pairSessionExists(code: string): Promise<boolean> {
+  return (await client!.exists(pairKey(code))) === 1;
+}

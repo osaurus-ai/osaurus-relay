@@ -64,3 +64,6 @@ export const requestLimiter = new RateLimiter(100, 60_000);
 
 // 10 stats requests per minute per source IP
 export const statsLimiter = new RateLimiter(10, 60_000);
+
+// 5 pair operations per minute per source IP
+export const pairLimiter = new RateLimiter(5, 60_000);

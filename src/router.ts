@@ -1,8 +1,9 @@
 import { getActiveTunnelCount, handleTunnelConnect } from "./tunnel.ts";
 import { relayRequest } from "./relay.ts";
-import { requestLimiter, statsLimiter, tunnelLimiter } from "./rate_limit.ts";
+import { pairLimiter, requestLimiter, statsLimiter, tunnelLimiter } from "./rate_limit.ts";
 import { getStats } from "./stats.ts";
 import { corsPreflightResponse, jsonResponse } from "./http.ts";
+import { handleApprove, handleFetch, handleInitiate, handleResult } from "./pairing.ts";
 
 const BASE_DOMAIN = Deno.env.get("BASE_DOMAIN") ?? "agent.osaurus.ai";
 const AGENT_ADDRESS_RE = /^0x[0-9a-f]{40}$/i;
@@ -57,6 +58,34 @@ export function handleRequest(
       return jsonResponse(429, { error: "rate_limited" });
     }
     return handleTunnelConnect(req, clientIp);
+  }
+
+  if (url.pathname === "/pair/initiate") {
+    if (req.method === "OPTIONS") return corsPreflightResponse();
+    if (req.method !== "POST") return jsonResponse(405, { error: "method_not_allowed" });
+    if (!pairLimiter.allow(clientIp)) return jsonResponse(429, { error: "rate_limited" });
+    return handleInitiate(req);
+  }
+
+  if (url.pathname === "/pair/approve") {
+    if (req.method === "OPTIONS") return corsPreflightResponse();
+    if (req.method !== "POST") return jsonResponse(405, { error: "method_not_allowed" });
+    if (!pairLimiter.allow(clientIp)) return jsonResponse(429, { error: "rate_limited" });
+    return handleApprove(req);
+  }
+
+  const pairFetchMatch = url.pathname.match(/^\/pair\/(\d{4})$/);
+  if (pairFetchMatch) {
+    if (req.method === "OPTIONS") return corsPreflightResponse();
+    if (!pairLimiter.allow(clientIp)) return jsonResponse(429, { error: "rate_limited" });
+    return handleFetch(pairFetchMatch[1]);
+  }
+
+  const pairResultMatch = url.pathname.match(/^\/pair\/(\d{4})\/result$/);
+  if (pairResultMatch) {
+    if (req.method === "OPTIONS") return corsPreflightResponse();
+    if (!pairLimiter.allow(clientIp)) return jsonResponse(429, { error: "rate_limited" });
+    return handleResult(pairResultMatch[1]);
   }
 
   const agentAddress = extractAgentAddress(host);

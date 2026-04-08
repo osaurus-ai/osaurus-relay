@@ -7,6 +7,7 @@ import {
   teardownStreaming,
 } from "./relay.ts";
 import { claimAgent, refreshAgentsTTL, releaseAgent } from "./redis.ts";
+import { AuthFrameSchema, InboundFrameSchema } from "./schemas.ts";
 import { recordTunnelConnect } from "./stats.ts";
 import type {
   AddAgentFrame,
@@ -204,12 +205,15 @@ function handleRemoveAgent(
 }
 
 function onMessage(conn: TunnelConnection, data: string): void {
-  let frame: InboundFrame;
+  let parsed: unknown;
   try {
-    frame = JSON.parse(data);
+    parsed = JSON.parse(data);
   } catch {
     return;
   }
+  const frameResult = InboundFrameSchema.safeParse(parsed);
+  if (!frameResult.success) return;
+  const frame: InboundFrame = frameResult.data;
 
   switch (frame.type) {
     case "pong":
@@ -284,20 +288,22 @@ export function handleTunnelConnect(req: Request, clientIp: string): Response {
     if (!data) return;
 
     if (!authenticated) {
-      let frame: AuthFrame;
+      let parsed: unknown;
       try {
-        frame = JSON.parse(data);
+        parsed = JSON.parse(data);
       } catch {
         send(socket, { type: "auth_error", error: "invalid_json" });
         socket.close(4000, "invalid json");
         return;
       }
 
-      if (frame.type !== "auth" || !Array.isArray(frame.agents) || !frame.timestamp) {
+      const authResult = AuthFrameSchema.safeParse(parsed);
+      if (!authResult.success) {
         send(socket, { type: "auth_error", error: "expected_auth_frame" });
         socket.close(4000, "expected auth frame");
         return;
       }
+      const frame: AuthFrame = authResult.data;
 
       if (frame.nonce !== challengeNonce) {
         send(socket, { type: "auth_error", error: "invalid_nonce" });

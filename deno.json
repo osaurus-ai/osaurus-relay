@@ -10,7 +10,8 @@
   },
   "imports": {
     "viem": "npm:viem@^2.28.0",
-    "ioredis": "npm:ioredis@^5"
+    "ioredis": "npm:ioredis@^5",
+    "zod": "npm:zod@^4"
   },
   "compilerOptions": {
     "strict": true

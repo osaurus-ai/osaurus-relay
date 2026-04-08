@@ -1,6 +1,7 @@
 import { verifyMessage } from "viem";
 import { jsonResponse, readBody } from "./http.ts";
 import { getPairSession, pairSessionExists, setPairSession } from "./redis.ts";
+import { PairApproveBodySchema, PairInitiateBodySchema } from "./schemas.ts";
 
 const TIMESTAMP_WINDOW_SECONDS = 30;
 
@@ -48,17 +49,17 @@ export async function handleInitiate(req: Request): Promise<Response> {
   const raw = await readBody(req, 1024);
   if (raw === null) return jsonResponse(400, { error: "body_too_large" });
 
-  let body: { agentAddress?: string; timestamp?: number; signature?: string };
+  let parsed: unknown;
   try {
-    body = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     return jsonResponse(400, { error: "invalid_json" });
   }
 
-  const { agentAddress, timestamp, signature } = body;
-  if (!agentAddress || typeof timestamp !== "number" || !signature) {
-    return jsonResponse(400, { error: "missing_fields" });
-  }
+  const result = PairInitiateBodySchema.safeParse(parsed);
+  if (!result.success) return jsonResponse(400, { error: "invalid_request" });
+
+  const { agentAddress, timestamp, signature } = result.data;
   if (!isValidTimestamp(timestamp)) {
     return jsonResponse(400, { error: "timestamp_out_of_window" });
   }
@@ -100,22 +101,17 @@ export async function handleApprove(req: Request): Promise<Response> {
   const raw = await readBody(req, 1024);
   if (raw === null) return jsonResponse(400, { error: "body_too_large" });
 
-  let body: {
-    code?: string;
-    pairingAddress?: string;
-    timestamp?: number;
-    signature?: string;
-  };
+  let parsed: unknown;
   try {
-    body = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     return jsonResponse(400, { error: "invalid_json" });
   }
 
-  const { code, pairingAddress, timestamp, signature } = body;
-  if (!code || !pairingAddress || typeof timestamp !== "number" || !signature) {
-    return jsonResponse(400, { error: "missing_fields" });
-  }
+  const result = PairApproveBodySchema.safeParse(parsed);
+  if (!result.success) return jsonResponse(400, { error: "invalid_request" });
+
+  const { code, pairingAddress, confirmCode, timestamp, signature } = result.data;
   if (!isValidCode(code)) return jsonResponse(400, { error: "invalid_code" });
   if (!isValidTimestamp(timestamp))
     return jsonResponse(400, { error: "timestamp_out_of_window" });
@@ -125,7 +121,8 @@ export async function handleApprove(req: Request): Promise<Response> {
   if (session.state === "approved")
     return jsonResponse(409, { error: "already_approved" });
 
-  const message = `osaurus-pair:approve:${code}:${session.initiatorAddress}:${pairingAddress}:${timestamp}`;
+  const message =
+    `osaurus-pair:approve:${code}:${session.initiatorAddress}:${pairingAddress}:${confirmCode}:${timestamp}`;
   const valid = await verifySig(pairingAddress, message, signature);
   if (!valid) return jsonResponse(401, { error: "invalid_signature" });
 
@@ -133,6 +130,9 @@ export async function handleApprove(req: Request): Promise<Response> {
     initiatorAddress: session.initiatorAddress,
     state: "approved",
     approverAddress: pairingAddress.toLowerCase(),
+    confirmCode,
+    approverSignature: signature,
+    approverTimestamp: timestamp,
   });
 
   return jsonResponse(200, { initiatorAddress: session.initiatorAddress });
@@ -150,6 +150,9 @@ export async function handleResult(code: string): Promise<Response> {
     return jsonResponse(200, {
       status: "approved",
       approverAddress: session.approverAddress,
+      confirmCode: session.confirmCode,
+      approverSignature: session.approverSignature,
+      approverTimestamp: session.approverTimestamp,
     });
   }
   return jsonResponse(200, { status: "pending" });

@@ -1,4 +1,6 @@
 import { Redis } from "ioredis";
+import { PairSessionSchema } from "./schemas.ts";
+import type { PairSession } from "./schemas.ts";
 
 const AGENT_TTL_SECONDS = 120;
 
@@ -84,11 +86,7 @@ export function refreshAgentsTTL(addresses: Iterable<string>): void {
 
 const PAIR_TTL_SECONDS = 300;
 
-export interface PairSession {
-  initiatorAddress: string;
-  state: "pending" | "approved";
-  approverAddress?: string;
-}
+export type { PairSession };
 
 function pairKey(code: string): string {
   return `pair:${code}`;
@@ -101,7 +99,8 @@ export async function setPairSession(code: string, session: PairSession): Promis
 export async function getPairSession(code: string): Promise<PairSession | null> {
   const raw = await client!.get(pairKey(code));
   if (!raw) return null;
-  return JSON.parse(raw) as PairSession;
+  const result = PairSessionSchema.safeParse(JSON.parse(raw));
+  return result.success ? result.data : null;
 }
 
 export async function pairSessionExists(code: string): Promise<boolean> {

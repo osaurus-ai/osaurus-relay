@@ -1,9 +1,21 @@
+import type { z } from "zod";
+import type {
+  AddAgentFrameSchema,
+  AgentAuthSchema,
+  AuthFrameSchema,
+  InboundFrameSchema,
+  PongFrameSchema,
+  RemoveAgentFrameSchema,
+  RequestChallengeFrameSchema,
+  ResponseFrameSchema,
+  StreamChunkFrameSchema,
+  StreamEndFrameSchema,
+  StreamStartFrameSchema,
+} from "./schemas.ts";
+
 // --- Agent types ---
 
-export interface AgentAuth {
-  address: string;
-  signature: string;
-}
+export type AgentAuth = z.infer<typeof AgentAuthSchema>;
 
 export interface AgentInfo {
   address: string;
@@ -12,71 +24,16 @@ export interface AgentInfo {
 
 // --- Inbound frames (Osaurus client -> relay) ---
 
-export interface AuthFrame {
-  type: "auth";
-  agents: AgentAuth[];
-  nonce: string;
-  timestamp: number;
-}
-
-export interface AddAgentFrame {
-  type: "add_agent";
-  address: string;
-  signature: string;
-  nonce: string;
-  timestamp: number;
-}
-
-export interface RemoveAgentFrame {
-  type: "remove_agent";
-  address: string;
-}
-
-export interface PongFrame {
-  type: "pong";
-  ts: number;
-}
-
-export interface ResponseFrame {
-  type: "response";
-  id: string;
-  status: number;
-  headers: Record<string, string>;
-  body: string;
-}
-
-export interface StreamStartFrame {
-  type: "stream_start";
-  id: string;
-  status: number;
-  headers: Record<string, string>;
-}
-
-export interface StreamChunkFrame {
-  type: "stream_chunk";
-  id: string;
-  data: string;
-}
-
-export interface StreamEndFrame {
-  type: "stream_end";
-  id: string;
-}
-
-export interface RequestChallengeFrame {
-  type: "request_challenge";
-}
-
-export type InboundFrame =
-  | AuthFrame
-  | AddAgentFrame
-  | RemoveAgentFrame
-  | PongFrame
-  | ResponseFrame
-  | StreamStartFrame
-  | StreamChunkFrame
-  | StreamEndFrame
-  | RequestChallengeFrame;
+export type AuthFrame = z.infer<typeof AuthFrameSchema>;
+export type AddAgentFrame = z.infer<typeof AddAgentFrameSchema>;
+export type RemoveAgentFrame = z.infer<typeof RemoveAgentFrameSchema>;
+export type PongFrame = z.infer<typeof PongFrameSchema>;
+export type ResponseFrame = z.infer<typeof ResponseFrameSchema>;
+export type StreamStartFrame = z.infer<typeof StreamStartFrameSchema>;
+export type StreamChunkFrame = z.infer<typeof StreamChunkFrameSchema>;
+export type StreamEndFrame = z.infer<typeof StreamEndFrameSchema>;
+export type RequestChallengeFrame = z.infer<typeof RequestChallengeFrameSchema>;
+export type InboundFrame = z.infer<typeof InboundFrameSchema>;
 
 // --- Outbound frames (relay -> Osaurus client) ---
 

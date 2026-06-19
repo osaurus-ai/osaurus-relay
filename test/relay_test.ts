@@ -33,7 +33,9 @@ function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
-async function connectAndAuth(port: number): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
+async function connectAndAuth(
+  port: number,
+): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();

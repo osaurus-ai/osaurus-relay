@@ -12,10 +12,13 @@ import { MockRedis } from "./redis_mock.ts";
 const OTHER_MACHINE = "other-machine-id";
 const ADDR = "0xaabbccdd";
 
+// Each test installs its own client at the start, so isolation only requires
+// resetting the shared singleton back to null at the end of any test that set a
+// mock — otherwise it would leak into other test files (which share the same
+// redis.ts module instance). This mirrors the manual-reset pattern used in
+// tunnel_test.ts and relay_test.ts.
+
 // --- claimAgent ---
-Deno.test.afterEach(() => {
-  _setClientForTesting(null);
-});
 
 Deno.test("claimAgent - no client returns true", async () => {
   _setClientForTesting(null);
@@ -28,6 +31,8 @@ Deno.test("claimAgent - unclaimed key is claimed", async () => {
 
   assertEquals(await claimAgent(ADDR), true);
   assertEquals(mock.store.get(`agent:${ADDR}`)?.value, FLY_MACHINE_ID);
+
+  _setClientForTesting(null);
 });
 
 Deno.test(
@@ -41,6 +46,8 @@ Deno.test(
     _setClientForTesting(mock);
 
     assertEquals(await claimAgent(ADDR), true);
+
+    _setClientForTesting(null);
   },
 );
 
@@ -55,6 +62,8 @@ Deno.test(
     _setClientForTesting(mock);
 
     assertEquals(await claimAgent(ADDR), false);
+
+    _setClientForTesting(null);
   },
 );
 
@@ -70,6 +79,8 @@ Deno.test("claimAgent - Redis error propagates", async () => {
     threw = true;
   }
   assertEquals(threw, true);
+
+  _setClientForTesting(null);
 });
 
 // --- releaseAgent ---
@@ -89,6 +100,8 @@ Deno.test("releaseAgent - deletes key owned by this machine", async () => {
 
   await releaseAgent(ADDR);
   assertEquals(mock.store.has(`agent:${ADDR}`), false);
+
+  _setClientForTesting(null);
 });
 
 Deno.test(
@@ -169,6 +182,8 @@ Deno.test("refreshAgentsTTL - calls expire for each address", async () => {
     mock.expireCalls.map((c) => c.key),
     addrs.map((a) => `agent:${a}`),
   );
+
+  _setClientForTesting(null);
 });
 
 Deno.test("refreshAgentsTTL - empty iterable does nothing", async () => {
@@ -179,4 +194,6 @@ Deno.test("refreshAgentsTTL - empty iterable does nothing", async () => {
   await Promise.resolve();
 
   assertEquals(mock.expireCalls.length, 0);
+
+  _setClientForTesting(null);
 });

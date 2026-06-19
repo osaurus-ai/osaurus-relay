@@ -28,7 +28,9 @@ function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
-async function connectAndAuth(port: number): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
+async function connectAndAuth(
+  port: number,
+): Promise<{ ws: WebSocket; authResp: Record<string, unknown> }> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
@@ -155,6 +157,81 @@ Deno.test({
     assertEquals(resp.status, 200);
     const body = await resp.json();
     assertEquals(body.result, "buffered");
+
+    ws.close();
+    await new Promise((r) => setTimeout(r, 100));
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "streaming - caller disconnect cancels the host generation",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const { ws } = await connectAndAuth(port);
+
+    let requestId = "";
+    let resolveCancel!: (id: string) => void;
+    const cancelReceived = new Promise<string>((r) => {
+      resolveCancel = r;
+    });
+
+    ws.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      if (frame.type === "request") {
+        requestId = frame.id;
+        ws.send(JSON.stringify({
+          type: "stream_start",
+          id: frame.id,
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }));
+        ws.send(JSON.stringify({
+          type: "stream_chunk",
+          id: frame.id,
+          data: "data: one\n\n",
+        }));
+        // Deliberately leave the stream open (no stream_end) to mimic an
+        // ongoing generation the caller abandons.
+      } else if (frame.type === "cancel") {
+        resolveCancel(frame.id);
+      }
+    };
+
+    const ac = new AbortController();
+    const agentAddr = account.address.toLowerCase();
+    const resp = await handleRequest(
+      new Request("http://localhost/v1/chat/completions?stream=true", {
+        method: "POST",
+        headers: {
+          host: `${agentAddr}.agent.osaurus.ai`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "test", stream: true }),
+        signal: ac.signal,
+      }),
+      mockInfo(),
+    );
+
+    assertEquals(resp.status, 200);
+
+    // Read the first chunk, then simulate the caller hanging up mid-stream.
+    const reader = resp.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    ac.abort();
+
+    const cancelledId = await Promise.race([
+      cancelReceived,
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error("no cancel frame received")), 3000)
+      ),
+    ]);
+    assertEquals(cancelledId, requestId);
 
     ws.close();
     await new Promise((r) => setTimeout(r, 100));

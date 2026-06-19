@@ -16,7 +16,7 @@
  *   7. Press Ctrl+C to disconnect
  */
 
-import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const BASE_DOMAIN = Deno.args[0] ?? "agent.osaurus.ai";
 const isLocal = BASE_DOMAIN.startsWith("localhost") || BASE_DOMAIN.startsWith("127.");

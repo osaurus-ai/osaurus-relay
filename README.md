@@ -189,7 +189,13 @@ Adding an agent mid-session requires a new challenge-response exchange to get a 
 **Step 3:** Send the `add_agent` frame with the nonce:
 
 ```json
-{ "type": "add_agent", "address": "0xNewAgent...", "signature": "0x...", "nonce": "d4e5f6...same nonce", "timestamp": 1709136030 }
+{
+  "type": "add_agent",
+  "address": "0xNewAgent...",
+  "signature": "0x...",
+  "nonce": "d4e5f6...same nonce",
+  "timestamp": 1709136030
+}
 ```
 
 The signature covers `osaurus-tunnel:<agent-address>:<nonce>:<timestamp>`, same as initial auth.
@@ -268,6 +274,18 @@ If no `response` or `stream_start` is sent within **30 seconds**, the relay retu
 
 Multiple requests can be in-flight simultaneously over the same WebSocket — the `id` field is used to match responses to requests. The client chooses per-request whether to use buffered or streaming mode.
 
+### Cancellation
+
+When the public caller disconnects before a request completes — the browser tab closes, the user hits a "stop" button, or the network drops — the relay sends a `cancel` frame for that request `id`:
+
+```json
+{ "type": "cancel", "id": "req_abc123" }
+```
+
+The relay also sends `cancel` when one of its own timeouts fires (the `504` request timeout or the 30-second stream inactivity timeout), since the caller is no longer waiting on the response.
+
+On receiving `cancel`, the client **should** abort the in-flight work for that `id` (stop generating, release the model, close any upstream connection) rather than finishing into a dead stream. After a `cancel`, any further `stream_chunk`/`stream_end`/`response` frames the client sends for that `id` are ignored by the relay. A `cancel` for an unknown or already-completed `id` is a no-op.
+
 ### Keepalive
 
 The relay sends a `ping` frame every 30 seconds:
@@ -298,26 +316,26 @@ The relay may send error frames for protocol violations:
 
 Callers hitting agent subdomains may receive these relay-level errors:
 
-| Status | Body                                | Meaning                                    |
-| ------ | ----------------------------------- | ------------------------------------------ |
-| 400    | `{"error":"invalid_subdomain"}`     | Subdomain is not a valid agent address     |
-| 413    | `{"error":"body_too_large"}`        | Request body exceeds 10 MB                 |
-| 429    | `{"error":"rate_limited"}`          | Too many requests to this agent            |
-| 429    | `{"error":"too_many_connections"}`  | IP has too many open tunnels (max 10)      |
-| 502    | `{"error":"agent_offline"}`         | No active tunnel for this agent            |
-| 502    | `{"error":"tunnel_send_failed"}`    | Failed to send request through the tunnel  |
-| 504    | `{"error":"gateway_timeout"}`       | Agent didn't respond within 30 seconds     |
+| Status | Body                               | Meaning                                   |
+| ------ | ---------------------------------- | ----------------------------------------- |
+| 400    | `{"error":"invalid_subdomain"}`    | Subdomain is not a valid agent address    |
+| 413    | `{"error":"body_too_large"}`       | Request body exceeds 10 MB                |
+| 429    | `{"error":"rate_limited"}`         | Too many requests to this agent           |
+| 429    | `{"error":"too_many_connections"}` | IP has too many open tunnels (max 10)     |
+| 502    | `{"error":"agent_offline"}`        | No active tunnel for this agent           |
+| 502    | `{"error":"tunnel_send_failed"}`   | Failed to send request through the tunnel |
+| 504    | `{"error":"gateway_timeout"}`      | Agent didn't respond within 30 seconds    |
 
 ### Rate Limits
 
-| Scope                      | Limit                     |
-| -------------------------- | ------------------------- |
-| Tunnel connections         | 5/min per IP              |
-| Concurrent tunnels per IP  | 10 max                    |
-| Stats endpoint             | 10/min per IP             |
-| Inbound requests           | 100/min per agent address |
-| Agents per tunnel          | 50 max                    |
-| Request body size          | 10 MB max (streaming read with early abort) |
+| Scope                     | Limit                                       |
+| ------------------------- | ------------------------------------------- |
+| Tunnel connections        | 5/min per IP                                |
+| Concurrent tunnels per IP | 10 max                                      |
+| Stats endpoint            | 10/min per IP                               |
+| Inbound requests          | 100/min per agent address                   |
+| Agents per tunnel         | 50 max                                      |
+| Request body size         | 10 MB max (streaming read with early abort) |
 
 ## Security Model
 
@@ -344,14 +362,37 @@ fly deploy
 
 The `fly.toml` is configured with `auto_stop_machines = 'off'` and `min_machines_running = 1` to keep at least one machine always running — idle shutdown would kill all active WebSocket tunnels.
 
-DNS setup:
+### DNS and TLS setup
+
+Point the wildcard at the Fly app (use the IPs from `fly ips list`):
 
 ```
 *.agent.osaurus.ai.  A     <fly.io IP>
 *.agent.osaurus.ai.  AAAA  <fly.io IPv6>
 ```
 
-Fly.io handles TLS termination with automatic certs for wildcard subdomains.
+Fly.io does **not** auto-issue wildcard certificates — you must request one and validate it via a DNS-01 challenge:
+
+```bash
+fly certs add "*.agent.osaurus.ai"
+fly certs setup "*.agent.osaurus.ai"   # prints the exact records below
+```
+
+`fly certs setup` prints an ACME DNS challenge record that you must add:
+
+```
+CNAME _acme-challenge.agent.osaurus.ai → agent.osaurus.ai.<id>.flydns.net
+```
+
+> [!IMPORTANT]
+> A wildcard TLS cert can only be validated with DNS-01, never HTTP-01. The
+> `_acme-challenge.agent.osaurus.ai` CNAME **must be an explicit record**. Do not
+> let the `*.agent.osaurus.ai` wildcard cover it — the wildcard matches
+> `_acme-challenge.agent.osaurus.ai` and silently points it at the app, so the
+> ACME challenge never validates, the certificate fails to renew, and every
+> per-agent subdomain returns `ERR_CONNECTION_CLOSED` once the cert expires.
+
+Verify issuance with `fly certs show "*.agent.osaurus.ai"` (status should be `Ready`/`Issued`). Until the wildcard cert is issued, requests to `https://0x<agent>.agent.osaurus.ai` are dropped during the TLS handshake even though the relay app is healthy.
 
 ## License
 

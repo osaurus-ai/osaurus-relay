@@ -1,11 +1,6 @@
 import { getTunnelForAgent } from "./tunnel.ts";
 import { recordRequest } from "./stats.ts";
-import {
-  jsonResponse,
-  readBody,
-  sanitizeRequestHeaders,
-  sanitizeResponseHeaders,
-} from "./http.ts";
+import { jsonResponse, readBody, sanitizeRequestHeaders, sanitizeResponseHeaders } from "./http.ts";
 import { FLY_MACHINE_ID, lookupAgentInstance } from "./redis.ts";
 import type {
   ResponseFrame,
@@ -66,19 +61,53 @@ export async function relayRequest(
     body,
   };
 
-  return sendAndAwait(conn, id, frame);
+  return sendAndAwait(conn, id, frame, req.signal);
+}
+
+/**
+ * Tells the host to abandon an in-flight request. Best-effort: if the socket is
+ * already gone, tunnel teardown will cancel everything anyway.
+ */
+function sendCancel(conn: TunnelConnection, id: string): void {
+  try {
+    conn.ws.send(JSON.stringify({ type: "cancel", id }));
+  } catch { /* socket already gone */ }
 }
 
 function sendAndAwait(
   conn: TunnelConnection,
   id: string,
   frame: Record<string, unknown>,
+  signal: AbortSignal,
 ): Promise<Response> {
   return new Promise<Response>((resolve) => {
     const timer = setTimeout(() => {
       conn.pending.delete(id);
+      // The host never answered in time. Tell it to stop so a slow generation
+      // (or a stuck model load) doesn't keep running after we've already
+      // returned 504 to the caller.
+      sendCancel(conn, id);
       resolve(jsonResponse(504, { error: "gateway_timeout" }));
     }, REQUEST_TIMEOUT_MS);
+
+    // A caller hanging up (closed tab, "stop" button, network drop) aborts the
+    // request signal. Propagate that to the host as a `cancel` frame so it
+    // tears down the in-flight generation instead of streaming into the void.
+    // The map membership check makes this a no-op once the request has already
+    // completed normally, so a late abort after `stream_end` does nothing.
+    const onAbort = () => {
+      const wasPending = conn.pending.delete(id);
+      if (wasPending) clearTimeout(timer);
+      const streaming = conn.streaming.get(id);
+      if (streaming) {
+        clearTimeout(streaming.timer);
+        conn.streaming.delete(id);
+        try {
+          streaming.controller.error(new Error("client_disconnected"));
+        } catch { /* already closed */ }
+      }
+      if (wasPending || streaming) sendCancel(conn, id);
+    };
 
     conn.pending.set(id, {
       resolve: (resp: ResponseFrame) => {
@@ -99,6 +128,9 @@ function sendAndAwait(
 
         const idleTimer = setTimeout(() => {
           conn.streaming.delete(id);
+          // No chunk for the idle window: the host is stuck. Stop it and close
+          // the caller's stream cleanly.
+          sendCancel(conn, id);
           try {
             controller.close();
           } catch { /* already closed */ }
@@ -115,6 +147,16 @@ function sendAndAwait(
       },
       timer,
     });
+
+    // Caller already gave up before we forwarded anything: don't dispatch, and
+    // there is nothing for the host to cancel since it never saw the request.
+    if (signal.aborted) {
+      clearTimeout(timer);
+      conn.pending.delete(id);
+      resolve(jsonResponse(499, { error: "client_disconnected" }));
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
 
     try {
       conn.ws.send(JSON.stringify(frame));
@@ -152,6 +194,8 @@ export function handleStreamChunk(
   }
   streaming.timer = setTimeout(() => {
     conn.streaming.delete(frame.id);
+    // Stalled mid-stream: stop the host and close the caller's stream cleanly.
+    sendCancel(conn, frame.id);
     try {
       streaming.controller.close();
     } catch { /* already closed */ }

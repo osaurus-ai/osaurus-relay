@@ -126,6 +126,17 @@ export interface ChallengeFrame {
   nonce: string;
 }
 
+/**
+ * Tells the Osaurus client to abandon an in-flight request. Sent when the
+ * public caller disconnects (closed tab, "stop", network drop) or when a relay
+ * timeout fires, so the host tears down the generation instead of streaming
+ * into a dead connection.
+ */
+export interface CancelFrame {
+  type: "cancel";
+  id: string;
+}
+
 export type OutboundFrame =
   | AuthOkFrame
   | AuthErrorFrame
@@ -134,7 +145,8 @@ export type OutboundFrame =
   | PingFrame
   | RequestFrame
   | ErrorFrame
-  | ChallengeFrame;
+  | ChallengeFrame
+  | CancelFrame;
 
 // --- Pending request tracking ---
 

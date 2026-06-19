@@ -1,4 +1,4 @@
-import { getActiveTunnelCount, getActiveAgentCount } from "./tunnel.ts";
+import { getActiveAgentCount, getActiveTunnelCount } from "./tunnel.ts";
 
 const startedAt = Date.now();
 

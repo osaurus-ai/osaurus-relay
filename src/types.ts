@@ -148,19 +148,30 @@ export type OutboundFrame =
   | ChallengeFrame
   | CancelFrame;
 
+// --- Timers ---
+
+/**
+ * Handle returned by setTimeout/setInterval. This is `number` under Deno's own
+ * lib types, but becomes `NodeJS.Timeout` once @types/node is in scope (pulled
+ * in transitively by the npm deps when `deno install` materializes a
+ * node_modules dir, e.g. in the Docker build). Deriving the type from the
+ * timer functions keeps the code type-checking in both environments.
+ */
+export type TimerHandle = ReturnType<typeof setTimeout>;
+
 // --- Pending request tracking ---
 
 export interface PendingRequest {
   resolve: (response: ResponseFrame) => void;
   resolveStream: (response: StreamStartFrame) => void;
-  timer: number;
+  timer: TimerHandle;
 }
 
 // --- Active streaming request tracking ---
 
 export interface StreamingRequest {
   controller: ReadableStreamDefaultController<Uint8Array>;
-  timer: number;
+  timer: TimerHandle;
 }
 
 // --- Tunnel connection state ---
@@ -172,7 +183,7 @@ export interface TunnelConnection {
   pending: Map<string, PendingRequest>;
   streaming: Map<string, StreamingRequest>;
   missedPings: number;
-  keepaliveTimer: number;
+  keepaliveTimer: TimerHandle | undefined;
   pendingNonce: string | null;
-  pendingNonceTimer: number | null;
+  pendingNonceTimer: TimerHandle | null;
 }

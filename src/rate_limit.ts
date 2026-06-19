@@ -1,3 +1,5 @@
+import type { TimerHandle } from "./types.ts";
+
 interface Bucket {
   tokens: number;
   lastRefill: number;
@@ -10,7 +12,7 @@ export class RateLimiter {
   private buckets = new Map<string, Bucket>();
   private maxTokens: number;
   private refillRate: number; // tokens per millisecond
-  private cleanupTimer: number;
+  private cleanupTimer: TimerHandle;
 
   constructor(maxTokens: number, windowMs: number) {
     this.maxTokens = maxTokens;

@@ -257,7 +257,7 @@ export function handleTunnelConnect(req: Request, clientIp: string): Response {
     pending: new Map<string, PendingRequest>(),
     streaming: new Map<string, StreamingRequest>(),
     missedPings: 0,
-    keepaliveTimer: 0,
+    keepaliveTimer: undefined,
     pendingNonce: null,
     pendingNonceTimer: null,
   };

@@ -71,6 +71,18 @@ export async function lookupAgentInstance(
 }
 
 /**
+ * Batch ownership lookup (presence): one MGET for many addresses. Position i is the owning
+ * machine id for addresses[i], or null when unclaimed. Without Redis, all null (single-instance
+ * deployments answer purely from the in-memory tunnel map).
+ */
+export async function lookupAgentInstances(
+  addresses: string[],
+): Promise<(string | null)[]> {
+  if (!client || addresses.length === 0) return addresses.map(() => null);
+  return await client.mget(addresses.map(agentKey));
+}
+
+/**
  * Refresh TTL for all given agent keys (fire-and-forget, call on keepalive pong).
  */
 export function refreshAgentsTTL(addresses: Iterable<string>): void {

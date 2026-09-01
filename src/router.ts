@@ -1,7 +1,8 @@
 import { getActiveTunnelCount, handleTunnelConnect } from "./tunnel.ts";
 import { relayRequest } from "./relay.ts";
-import { requestLimiter, statsLimiter, tunnelLimiter } from "./rate_limit.ts";
+import { presenceLimiter, requestLimiter, statsLimiter, tunnelLimiter } from "./rate_limit.ts";
 import { getStats } from "./stats.ts";
+import { handlePresence } from "./presence.ts";
 import { corsPreflightResponse, jsonResponse } from "./http.ts";
 
 const BASE_DOMAIN = Deno.env.get("BASE_DOMAIN") ?? "agent.osaurus.ai";
@@ -47,6 +48,14 @@ export function handleRequest(
       return jsonResponse(429, { error: "rate_limited" });
     }
     return jsonResponse(200, getStats());
+  }
+
+  // Internal, bearer-authed batch presence for the osaurus-router (Teams agent discoverability).
+  if (url.pathname === "/presence") {
+    if (!presenceLimiter.allow(clientIp)) {
+      return jsonResponse(429, { error: "rate_limited" });
+    }
+    return handlePresence(req, url);
   }
 
   if (url.pathname === "/tunnel/connect") {

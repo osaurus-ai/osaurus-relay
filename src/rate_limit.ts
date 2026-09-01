@@ -66,3 +66,8 @@ export const requestLimiter = new RateLimiter(100, 60_000);
 
 // 10 stats requests per minute per source IP
 export const statsLimiter = new RateLimiter(10, 60_000);
+
+// 120 presence requests per minute per source IP: sized for the router's service traffic
+// (short-cache batch lookups), and deliberately NOT shared with the public /stats bucket so
+// stats scraping can't starve presence (or vice versa).
+export const presenceLimiter = new RateLimiter(120, 60_000);

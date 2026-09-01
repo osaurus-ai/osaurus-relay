@@ -37,6 +37,10 @@ export class MockRedis {
     return Promise.resolve(this.getEntry(key));
   }
 
+  mget(keys: string[]): Promise<(string | null)[]> {
+    return Promise.resolve(keys.map((k) => this.getEntry(k)));
+  }
+
   del(key: string): Promise<number> {
     const had = this.store.has(key);
     this.store.delete(key);

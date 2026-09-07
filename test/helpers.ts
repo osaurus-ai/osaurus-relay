@@ -19,9 +19,21 @@ export function startServer(port: number): Deno.HttpServer {
   return Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
 }
 
+// Frames received before a test installs its own `onmessage` handler. The relay sends the
+// `challenge` immediately on open; on some runtimes it can be dispatched before the test's
+// continuation after `onopen` runs, so we buffer from socket creation instead of racing it.
+const inbox = new WeakMap<WebSocket, Record<string, unknown>[]>();
+
 export function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
+  const queued = inbox.get(ws);
+  if (queued && queued.length > 0) return Promise.resolve(queued.shift()!);
   return new Promise((resolve) => {
-    ws.onmessage = (e) => resolve(JSON.parse(e.data));
+    ws.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      // Keep buffering after this one resolves, in case the test awaits again later.
+      ws.onmessage = (e2) => inbox.get(ws)?.push(JSON.parse(e2.data));
+      resolve(frame);
+    };
   });
 }
 
@@ -31,6 +43,9 @@ export function sleep(ms: number): Promise<void> {
 
 export async function openSocket(port: number): Promise<WebSocket> {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
+  const queue: Record<string, unknown>[] = [];
+  inbox.set(ws, queue);
+  ws.onmessage = (e) => queue.push(JSON.parse(e.data));
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();
     ws.onerror = (e) => reject(e);

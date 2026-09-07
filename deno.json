@@ -2,7 +2,7 @@
   "tasks": {
     "dev": "deno run --allow-net --allow-env --watch main.ts",
     "start": "deno run --allow-net --allow-env main.ts",
-    "test": "deno test --allow-net --allow-env",
+    "test": "LOG_LEVEL=warn deno test --allow-net --allow-env",
     "lint": "deno lint",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
@@ -10,7 +10,8 @@
   },
   "imports": {
     "viem": "npm:viem@^2.28.0",
-    "ioredis": "npm:ioredis@^5"
+    "ioredis": "npm:ioredis@^5",
+    "zod": "npm:zod@^3.25.76"
   },
   "compilerOptions": {
     "strict": true

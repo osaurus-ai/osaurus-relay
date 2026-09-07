@@ -42,22 +42,24 @@ The server starts on port `8080` by default. Override with the `PORT` environmen
 osaurus-relay/
 ├── main.ts              # Entry point — Deno.serve() HTTP server
 ├── src/
-│   ├── router.ts        # HTTP routing: health, stats, tunnel connect, subdomain relay
-│   ├── tunnel.ts        # WebSocket tunnel lifecycle + keepalive
-│   ├── relay.ts         # HTTP-to-WS request multiplexing + timeout
+│   ├── router.ts        # HTTP routing: health, stats, presence, tunnel connect, subdomain relay
+│   ├── tunnel.ts        # WebSocket tunnel lifecycle, takeover, keepalive, shutdown
+│   ├── relay.ts         # HTTP-to-WS multiplexing, cross-machine routing, streaming, backpressure
+│   ├── route_cache.ts   # In-process agent -> owning machine cache in front of Redis
+│   ├── redis.ts         # Cross-machine ownership claims (Upstash Redis), degrade policy
+│   ├── frames.ts        # zod schemas validating every frame received from hosts
+│   ├── observability.ts # Structured JSON logs, per-request timing, Server-Timing headers
 │   ├── http.ts          # Shared HTTP helpers: JSON responses, CORS, header sanitization
 │   ├── auth.ts          # secp256k1 signature verification via viem
-│   ├── rate_limit.ts    # Token bucket rate limiter (per-IP and per-agent)
+│   ├── presence.ts      # Internal bearer-authed presence endpoint for the router
+│   ├── rate_limit.ts    # Token bucket rate limiters (per-IP, per-agent, per-connection)
+│   ├── lifecycle.ts     # Shutdown flag shared by main.ts and the router
+│   ├── env.ts           # Fly-injected environment (region, machine id, app name)
 │   ├── stats.ts         # Aggregate analytics counters
 │   └── types.ts         # All frame/message TypeScript types
-├── test/
-│   ├── auth_test.ts     # Signature verification tests
-│   ├── rate_limit_test.ts
-│   ├── stats_test.ts    # Analytics endpoint + counter tests
-│   ├── tunnel_test.ts   # Tunnel connect/disconnect/multi-agent tests
-│   ├── relay_test.ts    # Request forwarding tests
-│   └── streaming_test.ts # Streaming response tests
-├── Dockerfile           # Deno container for Fly.io
+├── test/                # deno test suite (see `deno task test`)
+├── .github/workflows/   # CI: fmt, lint, check, test; deploy on master
+├── Dockerfile           # Deno container for Fly.io (pinned by digest)
 ├── fly.toml             # Fly.io app config
 └── deno.json            # Deno config, tasks, imports
 ```
@@ -66,11 +68,13 @@ osaurus-relay/
 
 ### `GET /health`
 
-Health check. Returns `200 OK` with:
+Health check, also used by Fly's HTTP health check. Returns `200 OK` with:
 
 ```json
-{ "status": "ok", "tunnels": 42 }
+{ "status": "ok", "tunnels": 42, "region": "ams", "machine": "e784...", "redis": "ok" }
 ```
+
+`redis` is `degraded` when the coordination store is unreachable (the relay keeps serving from local state). During a graceful shutdown the endpoint returns `503` with `status: "shutting_down"` so Fly stops routing new traffic to the machine.
 
 ### `GET /stats`
 
@@ -78,15 +82,25 @@ Aggregate analytics. Returns `200 OK` with:
 
 ```json
 {
+  "region": "ams",
+  "machine": "e784...",
   "uptime_seconds": 12345,
   "active_tunnels": 3,
   "active_agents": 7,
   "total_requests_relayed": 1042,
-  "total_tunnel_connections": 15
+  "total_tunnel_connections": 15,
+  "total_replays": 310,
+  "total_internal_forwards": 2,
+  "total_invalid_frames": 0,
+  "total_bad_host_responses": 0,
+  "total_slow_consumer_aborts": 0,
+  "total_takeovers": 4,
+  "route_cache_entries": 12,
+  "redis_degraded": false
 }
 ```
 
-Rate-limited to 10 requests/min per IP.
+Counters are per machine. Rate-limited to 10 requests/min per IP.
 
 ### `WSS /tunnel/connect`
 
@@ -98,16 +112,35 @@ Agents can be added or removed mid-session without reconnecting.
 
 Public traffic to an agent's subdomain is relayed through the user's tunnel. The relay injects `X-Agent-Address` and `X-Forwarded-For` headers. Infrastructure headers (`fly-*`, `cf-*`) and sensitive caller headers (`cookie`) are stripped before forwarding; `authorization` is passed through for Osaurus client authentication. The Osaurus instance handles its own authentication — the relay is a transparent proxy.
 
-All agent subdomain responses include `Access-Control-Allow-Origin: *`. Preflight `OPTIONS` requests return `204` with appropriate CORS headers.
+Agent subdomain responses include `Access-Control-Allow-Origin: *` unless the Osaurus host set its own value. Preflight `OPTIONS` requests return `204` with appropriate CORS headers.
+
+Every relayed response also carries `x-relay-region`, `x-relay-machine` and a `Server-Timing` header (`lookup` = time resolving the owning machine, `host` = time waiting on the Osaurus host, `relay` = total time in the relay) so latency can be attributed from the client side.
+
+#### Multi-region routing
+
+Relay machines run in several Fly regions. A host's WebSocket lands on the nearest region via anycast; that machine becomes the agent's **owner** and records the claim in Redis. A public request lands on the machine nearest the _caller_, which is usually not the owner:
+
+1. The receiving machine resolves the owner (in-process route cache, then Redis) and answers `307` with `fly-replay: instance=<owner>` plus `fly-replay-cache: <agent-host>/*` (TTL 30s). Fly Proxy replays the request to the owner and caches the decision, so subsequent requests for that hostname from that edge go straight to the owner.
+2. If the cached target no longer owns the agent (the host reconnected elsewhere), it replays to the current owner with `fly-replay-cache: invalidate`.
+3. Fly cannot replay bodies over 1 MB. Those are streamed to the owner over the private network (`<machine>.vm.<app>.internal`) tagged `x-relay-internal-hop: 1`; the owner treats such requests as terminal.
+
+Rate limits are applied only by the owning machine, so routing hops never charge the agent's or caller's budget.
 
 ## Configuration
 
-| Variable      | Default            | Description                      |
-| ------------- | ------------------ | -------------------------------- |
-| `PORT`        | `8080`             | HTTP server port                 |
-| `BASE_DOMAIN` | `agent.osaurus.ai` | Base domain for agent subdomains |
+| Variable                                       | Default            | Description                                                             |
+| ---------------------------------------------- | ------------------ | ----------------------------------------------------------------------- |
+| `PORT`                                         | `8080`             | HTTP server port                                                        |
+| `BASE_DOMAIN`                                  | `agent.osaurus.ai` | Base domain for agent subdomains                                        |
+| `REDIS_URL`                                    | unset              | Upstash Redis for cross-machine ownership; single-machine mode if unset |
+| `PRESENCE_TOKEN`                               | unset              | Bearer token for the internal `/presence` endpoint (>= 32 chars)        |
+| `LOG_LEVEL`                                    | `info`             | `debug`, `info`, `warn` or `error`; logs are JSON lines on stdout       |
+| `FLY_REGION`, `FLY_MACHINE_ID`, `FLY_APP_NAME` | injected by Fly    | Used for routing and log/response tagging                               |
 
 ## Client Protocol Spec
+
+For guidance on building a robust client (reconnect policy, takeover semantics, frame limits,
+multi-region behaviour) see [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md).
 
 This section documents the WebSocket protocol for clients connecting a tunnel to the relay.
 
@@ -159,9 +192,14 @@ osaurus-tunnel:<agent-address>:<nonce>:<timestamp>
   "agents": [
     { "address": "0xagentaddress1...", "url": "https://0xagentaddress1.agent.osaurus.ai" },
     { "address": "0xagentaddress2...", "url": "https://0xagentaddress2.agent.osaurus.ai" }
-  ]
+  ],
+  "region": "ams"
 }
 ```
+
+`region` is the Fly region that terminated the tunnel (diagnostics only).
+
+**Takeover.** A valid signature proves possession of the agent's key, so the newest authenticated tunnel for an address always wins. If another connection (on any relay machine) currently holds the address, it receives `{"type":"agent_removed","address":"0x...","reason":"superseded"}` and is closed once it carries no agents. This means a host that reconnects after a network blip is never locked out waiting for its old socket to time out. Clients **must not** auto-reconnect for an address after receiving `reason: "superseded"`, or two sessions using the same identity will evict each other in a loop.
 
 On failure the relay sends `auth_error` and closes the socket:
 
@@ -203,7 +241,12 @@ The signature covers `osaurus-tunnel:<agent-address>:<nonce>:<timestamp>`, same 
 **Step 4:** Response:
 
 ```json
-{ "type": "agent_added", "address": "0xnewagent...", "url": "https://0xnewagent.agent.osaurus.ai" }
+{
+  "type": "agent_added",
+  "address": "0xnewagent...",
+  "url": "https://0xnewagent.agent.osaurus.ai",
+  "region": "ams"
+}
 ```
 
 Remove an agent:
@@ -218,7 +261,7 @@ Response:
 { "type": "agent_removed", "address": "0xagenttoremove..." }
 ```
 
-Maximum 50 agents per tunnel.
+Maximum 50 agents per tunnel. `request_challenge` and `add_agent` are limited to 10 per minute per connection.
 
 ### Handling Incoming Requests
 
@@ -310,32 +353,52 @@ The relay may send error frames for protocol violations:
 { "type": "error", "error": "max_agents_reached" }
 { "type": "error", "error": "invalid_signature" }
 { "type": "error", "error": "invalid_nonce" }
+{ "type": "error", "error": "rate_limited" }
+{ "type": "error", "error": "relay_restarting" }
 ```
+
+`relay_restarting` is sent to every tunnel just before the relay machine shuts down (deploy or restart), followed by a WebSocket close with code `1012`. Clients should reconnect immediately; anycast will place them on a healthy machine.
+
+Frames that fail validation (wrong shape, oversized `body`/`data`, illegal header values) are dropped. If such a frame names an in-flight request `id`, that request is failed with `502 bad_host_response` and a `cancel` frame is sent, rather than leaving the caller waiting for the 30-second timeout. A `response` or `stream_start` whose status cannot be represented (outside 200-599, or a body on 204/304) is likewise answered with `502 bad_host_response`.
 
 ### HTTP Error Codes
 
 Callers hitting agent subdomains may receive these relay-level errors:
 
-| Status | Body                               | Meaning                                   |
-| ------ | ---------------------------------- | ----------------------------------------- |
-| 400    | `{"error":"invalid_subdomain"}`    | Subdomain is not a valid agent address    |
-| 413    | `{"error":"body_too_large"}`       | Request body exceeds 10 MB                |
-| 429    | `{"error":"rate_limited"}`         | Too many requests to this agent           |
-| 429    | `{"error":"too_many_connections"}` | IP has too many open tunnels (max 10)     |
-| 502    | `{"error":"agent_offline"}`        | No active tunnel for this agent           |
-| 502    | `{"error":"tunnel_send_failed"}`   | Failed to send request through the tunnel |
-| 504    | `{"error":"gateway_timeout"}`      | Agent didn't respond within 30 seconds    |
+| Status | Body                               | Meaning                                        |
+| ------ | ---------------------------------- | ---------------------------------------------- |
+| 400    | `{"error":"invalid_subdomain"}`    | Subdomain is not a valid agent address         |
+| 413    | `{"error":"body_too_large"}`       | Request body exceeds 10 MB                     |
+| 429    | `{"error":"rate_limited"}`         | Agent or caller budget exhausted               |
+| 429    | `{"error":"too_many_connections"}` | IP has too many open tunnels (max 50)          |
+| 499    | `{"error":"client_disconnected"}`  | Caller hung up before the host answered        |
+| 502    | `{"error":"agent_offline"}`        | No active tunnel for this agent                |
+| 502    | `{"error":"agent_unreachable"}`    | Owning machine could not be reached            |
+| 502    | `{"error":"bad_host_response"}`    | Host answered with an unrepresentable response |
+| 502    | `{"error":"tunnel_send_failed"}`   | Failed to send request through the tunnel      |
+| 503    | `{"error":"relay_restarting"}`     | Machine is shutting down; retry                |
+| 504    | `{"error":"gateway_timeout"}`      | Agent didn't respond within 30 seconds         |
+
+Streams that stall for 30 seconds are closed. A caller that reads slower than the host streams is disconnected once the relay is holding more than 4 MB on its behalf (`slow_consumer`), and the host receives `cancel`.
 
 ### Rate Limits
 
-| Scope                     | Limit                                       |
-| ------------------------- | ------------------------------------------- |
-| Tunnel connections        | 5/min per IP                                |
-| Concurrent tunnels per IP | 10 max                                      |
-| Stats endpoint            | 10/min per IP                               |
-| Inbound requests          | 100/min per agent address                   |
-| Agents per tunnel         | 50 max                                      |
-| Request body size         | 10 MB max (streaming read with early abort) |
+All limits are per relay machine.
+
+| Scope                     | Limit                                                |
+| ------------------------- | ---------------------------------------------------- |
+| Tunnel connections        | 20/min per IP                                        |
+| Concurrent tunnels per IP | 50 max (counted from upgrade, pre-auth too)          |
+| Stats endpoint            | 10/min per IP                                        |
+| Presence endpoint         | 120/min per IP                                       |
+| Inbound requests          | 100/min per agent address (on the owner)             |
+| Inbound requests          | 300/min per caller IP (on the owner)                 |
+| Control frames            | 10/min per tunnel (`request_challenge`, `add_agent`) |
+| Agents per tunnel         | 50 max                                               |
+| Request body size         | 10 MB max (streaming read with early abort)          |
+| Response frame `body`     | 10 MB max                                            |
+| Stream chunk `data`       | 1 MB max                                             |
+| Stream buffer per caller  | 4 MB before `slow_consumer` abort                    |
 
 ## Security Model
 
@@ -343,24 +406,68 @@ The relay is a **transparent proxy**. It does not authenticate public traffic �
 
 Relay-level protections:
 
-- **IP detection** — uses `fly-client-ip` (set by Fly.io edge, not spoofable) over `x-forwarded-for` for all rate limiting and forwarding
-- **Rate limiting** — 100 req/min per agent address, 5 tunnel connects/min per IP, 10 stats req/min per IP
-- **Concurrent connection limit** — max 10 open WebSocket tunnels per IP
+- **IP detection** — uses `fly-client-ip` (set by Fly.io edge, not spoofable) over `x-forwarded-for` for all rate limiting and forwarding. `x-relay-client-ip` (set by a relay machine when forwarding large bodies internally) is only honoured when `fly-client-ip` is absent, i.e. the request did not come through the edge
+- **Rate limiting** — 100 req/min per agent address and 300 req/min per caller IP (so one caller cannot exhaust an agent's budget), 20 tunnel connects/min per IP, 10 control frames/min per tunnel, 10 stats req/min per IP
+- **Concurrent connection limit** — max 50 open WebSocket tunnels per IP, counted from the upgrade so unauthenticated sockets are covered
+- **Frame validation** — every frame from a host is schema-validated (zod) with size caps before it is acted on; malformed frames cannot throw inside the WebSocket handler
+- **Backpressure** — a slow caller cannot make the relay buffer unbounded response data on its behalf
+- **Crash isolation** — unhandled rejections and Redis errors are logged, never fatal; a Redis outage degrades to single-machine behaviour and is flagged on `/health`
 - **Max body size** — 10 MB per request, enforced via streaming read with early abort (prevents memory exhaustion from chunked-encoding attacks that omit `content-length`)
 - **Tunnel auth** — challenge-response handshake with server-issued single-use nonce + secp256k1 signature with 30-second timestamp window (prevents replay attacks)
 - **Connection limit** — 50 agents per tunnel
 - **Response header sanitization** — hop-by-hop headers (`transfer-encoding`, `connection`, `keep-alive`, `upgrade`, etc.) are stripped from response frames before constructing the HTTP response
 - **Request header sanitization** — infrastructure headers (`fly-*`, `cf-*`) and sensitive caller headers (`cookie`, `proxy-authorization`) are stripped before forwarding to the Osaurus client; `authorization` is forwarded since Osaurus clients use bearer tokens for their own authentication
-- **CORS** — agent subdomain responses include `Access-Control-Allow-Origin: *`; preflight `OPTIONS` are handled at the router level
+- **CORS** — agent subdomain responses include `Access-Control-Allow-Origin: *` unless the host sets its own; preflight `OPTIONS` are handled at the router level
+- **Ownership** — the newest authenticated tunnel for an address supersedes older ones (see Takeover above); Redis claims are released and refreshed only by their owner (compare-and-delete / compare-and-expire), so a machine can never clobber another machine's claim
 
 ## Deploy to Fly.io
 
+CI (`.github/workflows/ci.yml`) runs `fmt:check`, `lint`, `check` and `test` on every PR and push, and deploys `master` with `flyctl deploy --remote-only` when the `FLY_API_TOKEN` repository secret is set. Manual deploys work too:
+
 ```bash
-fly launch
 fly deploy
 ```
 
-The `fly.toml` is configured with `auto_stop_machines = 'off'` and `min_machines_running = 1` to keep at least one machine always running — idle shutdown would kill all active WebSocket tunnels.
+`fly.toml` notes:
+
+- `auto_stop_machines = 'off'` / `min_machines_running = 1` — idle shutdown would kill every active WebSocket tunnel.
+- `kill_timeout = 30` and `[deploy] strategy = 'rolling'`, `max_unavailable = 1` — on SIGTERM the relay flips `/health` to 503, drains in-flight requests for up to 20s, then sends `relay_restarting` and closes tunnels so hosts reconnect to a machine that is not restarting. One machine restarts at a time.
+- `[[http_service.checks]]` on `/health` — a wedged machine is pulled out of routing.
+- `memory_mb = 512` — each in-flight request may buffer up to 10 MB of body plus stream queues.
+
+### Multi-region
+
+Region placement is controlled with `fly scale`, not `fly.toml`. Hosts connect to the nearest region by anycast; callers are routed to the owning machine with `fly-replay` (see "Multi-region routing" above). Current layout:
+
+```bash
+fly scale count lax=2,iad=1,ams=1,sin=1,gru=1
+fly regions list
+```
+
+Add a region when logs show a cluster of hosts whose `tunnel.connected` region is far from where they are; two machines per region once a region carries enough tunnels that a single machine restart is disruptive.
+
+### Redis (Upstash) for cross-machine ownership
+
+`REDIS_URL` must point at an Upstash Redis with **read replicas in every region the app runs in**; ownership lookups on the request path read from the nearest replica (sub-millisecond), while claims (writes) are forwarded to the primary.
+
+```bash
+fly redis list
+fly redis update <db-name> --replica-regions iad,ams,sin,gru
+fly redis status <db-name>      # confirm "Read Regions"
+```
+
+The primary region cannot be changed after creation. Without `REDIS_URL` the relay runs in single-machine mode (no cross-machine routing).
+
+### Observability
+
+Every relayed request emits one JSON log line (`event: "relay.request"`) with `region`, `machine`, `agent`, `status`, `outcome`, `replay` (`direct` / `hit` / `miss` / `internal`), `lookup_ms`, `host_ms`, `ttfb_ms`, `total_ms`, `body_bytes`, `response_bytes`. Useful queries:
+
+```bash
+fly logs | grep '"event":"relay.request"'                  # per-request latency
+fly logs | grep -E 'PA0[123]'                              # Fly replay errors (buffer exceeded, loop, invalid)
+fly logs | grep -E 'redis.error|tunnel.takeover|handler_error'
+curl -sD - -o /dev/null https://0x<agent>.agent.osaurus.ai/ | grep -iE 'x-relay|server-timing'
+```
 
 ### DNS and TLS setup
 

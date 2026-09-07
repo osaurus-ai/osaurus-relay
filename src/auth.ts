@@ -37,14 +37,20 @@ export async function verifyAgent(
   return agent.address.toLowerCase();
 }
 
+/**
+ * Verifies every agent signature. All-or-nothing: one bad signature fails the whole frame.
+ * Verifications run concurrently; a 50-agent auth should not serialise 50 ECDSA recoveries.
+ */
 export async function verifyAuth(
   agents: AgentAuth[],
   nonce: string,
   timestamp: number,
 ): Promise<string[] | null> {
+  const results = await Promise.all(
+    agents.map((agent) => verifyAgent(agent, nonce, timestamp)),
+  );
   const verified: string[] = [];
-  for (const agent of agents) {
-    const addr = await verifyAgent(agent, nonce, timestamp);
+  for (const addr of results) {
     if (!addr) return null;
     verified.push(addr);
   }

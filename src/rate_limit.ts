@@ -58,11 +58,24 @@ export class RateLimiter {
   }
 }
 
-// 5 tunnel connection attempts per minute per source IP
-export const tunnelLimiter = new RateLimiter(5, 60_000);
+// All limiters are per relay machine (not shared across the fleet), so effective global limits
+// scale with machine count. They are abuse brakes, not quotas.
 
-// 100 inbound requests per minute per agent address
+// 20 tunnel connection attempts per minute per source IP. Sized so a team behind one NAT
+// (office, campus) can all reconnect after a relay restart without locking each other out.
+export const tunnelLimiter = new RateLimiter(20, 60_000);
+
+// 100 inbound requests per minute per agent address (checked only on the owning machine).
 export const requestLimiter = new RateLimiter(100, 60_000);
+
+// 300 inbound requests per minute per caller IP, independent of the per-agent budget above, so a
+// single caller cannot exhaust an agent's budget and lock its owner out.
+export const callerLimiter = new RateLimiter(300, 60_000);
+
+// 10 post-auth control frames (request_challenge / add_agent) per minute per tunnel connection.
+// Each add_agent costs an ECDSA recovery on the event loop; the 50-agent cap only counts
+// successes, so failures need their own brake.
+export const controlFrameLimiter = new RateLimiter(10, 60_000);
 
 // 10 stats requests per minute per source IP
 export const statsLimiter = new RateLimiter(10, 60_000);

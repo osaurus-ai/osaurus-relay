@@ -72,7 +72,7 @@ Deno.test("presence: redis-claimed agents are online, unknown ones offline", asy
   _setClientForTesting(redis);
   try {
     // ADDR_A is claimed (by any instance); ADDR_B is unknown.
-    await redis.set(`agent:${ADDR_A}`, "some-machine", "EX", 120, "NX", "GET");
+    await redis.set(`agent:${ADDR_A}`, "some-machine", "EX", 120, "GET");
     const { req, url } = presenceReq(`${ADDR_A},${ADDR_B.toUpperCase()}`);
     const res = await handlePresence(req, url);
     assertEquals(res.status, 200);

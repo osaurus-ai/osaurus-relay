@@ -1,3 +1,5 @@
+import type { RequestContext } from "./observability.ts";
+
 // --- Agent types ---
 
 export interface AgentAuth {
@@ -84,6 +86,8 @@ export interface AuthOkFrame {
   type: "auth_ok";
   agents: AgentInfo[];
   rejected?: { address: string; reason: string }[];
+  /** Fly region of the relay machine that terminated this tunnel (diagnostics). */
+  region?: string;
 }
 
 export interface AuthErrorFrame {
@@ -95,11 +99,18 @@ export interface AgentAddedFrame {
   type: "agent_added";
   address: string;
   url: string;
+  region?: string;
 }
 
 export interface AgentRemovedFrame {
   type: "agent_removed";
   address: string;
+  /**
+   * Present when the relay removed the agent on its own: `superseded` means a newer
+   * authenticated tunnel for the same address took over (this connection should NOT
+   * auto-reconnect for that address, or the two sessions will evict each other in a loop).
+   */
+  reason?: "superseded";
 }
 
 export interface PingFrame {
@@ -165,6 +176,7 @@ export interface PendingRequest {
   resolve: (response: ResponseFrame) => void;
   resolveStream: (response: StreamStartFrame) => void;
   timer: TimerHandle;
+  ctx: RequestContext;
 }
 
 // --- Active streaming request tracking ---
@@ -172,11 +184,14 @@ export interface PendingRequest {
 export interface StreamingRequest {
   controller: ReadableStreamDefaultController<Uint8Array>;
   timer: TimerHandle;
+  ctx: RequestContext;
 }
 
 // --- Tunnel connection state ---
 
 export interface TunnelConnection {
+  /** Opaque per-connection id (rate-limit key for post-auth control frames, log correlation). */
+  id: string;
   ws: WebSocket;
   clientIp: string;
   agents: Set<string>;

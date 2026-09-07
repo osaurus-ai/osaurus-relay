@@ -19,16 +19,25 @@ Deno.test("getStats - returns expected shape", () => {
 });
 
 Deno.test("recordRequest - increments total_requests_relayed", () => {
-  const before = getStats().total_requests_relayed;
+  const before = getStats().total_requests_relayed as number;
   recordRequest();
   recordRequest();
   assertEquals(getStats().total_requests_relayed, before + 2);
 });
 
 Deno.test("recordTunnelConnect - increments total_tunnel_connections", () => {
-  const before = getStats().total_tunnel_connections;
+  const before = getStats().total_tunnel_connections as number;
   recordTunnelConnect();
   assertEquals(getStats().total_tunnel_connections, before + 1);
+});
+
+Deno.test("getStats - includes region, machine and redis state", () => {
+  const stats = getStats();
+  assertEquals(typeof stats.region, "string");
+  assertEquals(typeof stats.machine, "string");
+  assertEquals(typeof stats.redis_degraded, "boolean");
+  assertEquals(typeof stats.total_replays, "number");
+  assertEquals(typeof stats.total_takeovers, "number");
 });
 
 Deno.test("GET /stats - returns stats JSON", async () => {

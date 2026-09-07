@@ -2,6 +2,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { privateKeyToAccount } from "viem/accounts";
 import { handleRequest } from "../src/router.ts";
 import { _setClientForTesting, FLY_MACHINE_ID } from "../src/redis.ts";
+import { _clearRouteCacheForTesting } from "../src/route_cache.ts";
 import { MockRedis } from "./redis_mock.ts";
 
 // An address never locally registered — used for cross-instance relay tests
@@ -153,6 +154,7 @@ Deno.test({
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
+    _clearRouteCacheForTesting();
     const mock = new MockRedis();
     mock.store.set(`agent:${REMOTE_AGENT}`, { value: "other-machine-id", expiresAt: Infinity });
     _setClientForTesting(mock);
@@ -166,9 +168,15 @@ Deno.test({
 
     assertEquals(resp.status, 307);
     assertEquals(resp.headers.get("fly-replay"), "instance=other-machine-id");
+    // Edge replay cache keyed by the agent hostname, so subsequent requests skip this hop.
+    assertEquals(resp.headers.get("fly-replay-cache"), `${REMOTE_AGENT}.agent.osaurus.ai/*`);
+    assertEquals(resp.headers.get("fly-replay-cache-ttl-secs"), "30");
+    assertEquals(typeof resp.headers.get("x-relay-region"), "string");
+    assertEquals(resp.headers.get("server-timing")?.includes("lookup;dur="), true);
     await resp.body?.cancel();
 
     _setClientForTesting(null);
+    _clearRouteCacheForTesting();
   },
 });
 
@@ -177,6 +185,7 @@ Deno.test({
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
+    _clearRouteCacheForTesting();
     const mock = new MockRedis();
     mock.store.set(`agent:${REMOTE_AGENT}`, { value: FLY_MACHINE_ID, expiresAt: Infinity });
     _setClientForTesting(mock);
@@ -193,5 +202,6 @@ Deno.test({
     assertEquals(body.error, "agent_offline");
 
     _setClientForTesting(null);
+    _clearRouteCacheForTesting();
   },
 });

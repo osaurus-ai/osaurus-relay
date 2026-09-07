@@ -234,7 +234,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "tunnel - duplicate agent address rejected at auth",
+  name: "tunnel - newer authenticated tunnel takes over the address (old one is superseded)",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -244,8 +244,11 @@ Deno.test({
 
     const { ws: ws1 } = await connectAndAuth(port);
 
+    const ws1Messages: Record<string, unknown>[] = [];
+    let ws1CloseCode: number | null = null;
     ws1.onmessage = (e) => {
       const frame = JSON.parse(e.data);
+      ws1Messages.push(frame);
       if (frame.type === "request") {
         ws1.send(JSON.stringify({
           type: "response",
@@ -256,12 +259,37 @@ Deno.test({
         }));
       }
     };
+    ws1.onclose = (e) => {
+      ws1CloseCode = e.code;
+    };
 
+    // A second tunnel authenticating the same address wins: proof of key possession is
+    // proof of ownership, and the newest session is the one the user is actually using.
     const { ws: ws2, authResp } = await connectAndAuth(port);
-    const rejected = authResp.rejected as { address: string; reason: string }[] | undefined;
-    assertEquals(Array.isArray(rejected), true);
-    assertEquals(rejected!.length, 1);
-    assertEquals(rejected![0].reason, "already_registered");
+    assertEquals(authResp.rejected, undefined);
+    assertEquals(typeof authResp.region, "string");
+    const agents = authResp.agents as { address: string }[];
+    assertEquals(agents.length, 1);
+
+    ws2.onmessage = (e) => {
+      const frame = JSON.parse(e.data);
+      if (frame.type === "request") {
+        ws2.send(JSON.stringify({
+          type: "response",
+          id: frame.id,
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ from: "second" }),
+        }));
+      }
+    };
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Old connection was told why, and closed since it has no agents left.
+    const evicted = ws1Messages.find((m) => m.type === "agent_removed");
+    assertEquals(evicted?.reason, "superseded");
+    assertEquals(evicted?.address, account.address.toLowerCase());
+    assertEquals(ws1CloseCode, 1000);
 
     const agentAddr = account.address.toLowerCase();
     const resp = await handleRequest(
@@ -277,10 +305,11 @@ Deno.test({
     );
 
     assertEquals(resp.status, 200);
+    assertEquals(typeof resp.headers.get("x-relay-region"), "string");
+    assertEquals(resp.headers.get("server-timing")?.includes("host;dur="), true);
     const body = await resp.json();
-    assertEquals(body.from, "first");
+    assertEquals(body.from, "second");
 
-    ws1.close();
     ws2.close();
     await new Promise((r) => setTimeout(r, 200));
     await server.shutdown();
@@ -288,7 +317,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "tunnel - add_agent rejected when address already registered by another connection",
+  name: "tunnel - add_agent takes over an address held by another connection",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -297,8 +326,29 @@ Deno.test({
     const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
 
     const { ws: ws1 } = await connectAndAuth(port);
+    const ws1Messages: Record<string, unknown>[] = [];
+    ws1.onmessage = (e) => ws1Messages.push(JSON.parse(e.data));
 
-    const { ws: ws2 } = await connectAndAuth(port);
+    // Second connection authenticates with a *different* address, then adds the first one.
+    const otherKey = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+    const otherAccount = privateKeyToAccount(otherKey);
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}/tunnel/connect`);
+    await new Promise<void>((resolve, reject) => {
+      ws2.onopen = () => resolve();
+      ws2.onerror = (e) => reject(e);
+    });
+    const challenge0 = await waitForMessage(ws2);
+    const ts0 = Math.floor(Date.now() / 1000);
+    const sig0 = await otherAccount.signMessage({
+      message: `osaurus-tunnel:${otherAccount.address}:${challenge0.nonce}:${ts0}`,
+    });
+    ws2.send(JSON.stringify({
+      type: "auth",
+      agents: [{ address: otherAccount.address, signature: sig0 }],
+      nonce: challenge0.nonce,
+      timestamp: ts0,
+    }));
+    assertEquals((await waitForMessage(ws2)).type, "auth_ok");
 
     ws2.send(JSON.stringify({ type: "request_challenge" }));
     const challenge = await waitForMessage(ws2);
@@ -317,8 +367,13 @@ Deno.test({
     }));
 
     const addResp = await waitForMessage(ws2);
-    assertEquals(addResp.type, "error");
-    assertEquals(addResp.error, "address_already_registered");
+    assertEquals(addResp.type, "agent_added");
+    assertEquals(addResp.address, account.address.toLowerCase());
+    assertEquals(typeof addResp.region, "string");
+
+    await new Promise((r) => setTimeout(r, 100));
+    const evicted = ws1Messages.find((m) => m.type === "agent_removed");
+    assertEquals(evicted?.reason, "superseded");
 
     ws1.close();
     ws2.close();
@@ -386,7 +441,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "tunnel - auth rejects agent claimed by a different fly instance",
+  name: "tunnel - auth takes over an agent claimed by a different fly instance",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -401,13 +456,65 @@ Deno.test({
 
     const { ws, authResp } = await connectAndAuth(port);
 
-    const rejected = authResp.rejected as { address: string; reason: string }[] | undefined;
-    assertEquals(Array.isArray(rejected), true);
-    assertEquals(rejected!.length, 1);
-    assertEquals(rejected![0].reason, "already_registered");
+    // The host reconnected to this machine (e.g. after a network blip, before the old machine
+    // noticed the dead socket). It must not be locked out: the claim moves to us.
+    assertEquals(authResp.rejected, undefined);
+    assertEquals((authResp.agents as unknown[]).length, 1);
+    assertEquals(mock.store.get(`agent:${agentAddr}`)?.value, FLY_MACHINE_ID);
 
     ws.close();
     await new Promise((r) => setTimeout(r, 100));
+    _setClientForTesting(null);
+    await server.shutdown();
+  },
+});
+
+Deno.test({
+  name: "tunnel - pong learns of a takeover elsewhere and drops the stale local registration",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    resetRateLimiter();
+    const port = nextPort();
+    const server = Deno.serve({ port, onListen() {} }, (req, info) => handleRequest(req, info));
+
+    const mock = new MockRedis();
+    _setClientForTesting(mock);
+
+    const { ws } = await connectAndAuth(port);
+    const agentAddr = account.address.toLowerCase();
+    assertEquals(mock.store.get(`agent:${agentAddr}`)?.value, FLY_MACHINE_ID);
+
+    const messages: Record<string, unknown>[] = [];
+    let closeCode: number | null = null;
+    ws.onmessage = (e) => messages.push(JSON.parse(e.data));
+    ws.onclose = (e) => {
+      closeCode = e.code;
+    };
+
+    // Simulate the host re-authenticating on another machine, which force-claimed the key.
+    mock.store.set(`agent:${agentAddr}`, { value: "other-machine-id", expiresAt: Infinity });
+
+    ws.send(JSON.stringify({ type: "pong", ts: Math.floor(Date.now() / 1000) }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    const evicted = messages.find((m) => m.type === "agent_removed");
+    assertEquals(evicted?.reason, "superseded");
+    assertEquals(closeCode, 1000);
+    // We never clobbered the other machine's claim.
+    assertEquals(mock.store.get(`agent:${agentAddr}`)?.value, "other-machine-id");
+
+    // Requests landing here now route onward instead of being served by the stale socket.
+    const resp = await handleRequest(
+      new Request("http://localhost/chat", {
+        headers: { host: `${agentAddr}.agent.osaurus.ai` },
+      }),
+      mockInfo(),
+    );
+    assertEquals(resp.status, 307);
+    assertEquals(resp.headers.get("fly-replay"), "instance=other-machine-id");
+    await resp.body?.cancel();
+
     _setClientForTesting(null);
     await server.shutdown();
   },

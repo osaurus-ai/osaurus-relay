@@ -1,23 +1,44 @@
-# fly.toml app configuration file generated for osaurus-relay on 2026-02-28T12:48:44Z
+# fly.toml app configuration file for osaurus-relay
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
+# Multi-region: machines run in several regions (see README "Deploy to Fly.io"). Hosts connect to
+# the nearest region via anycast; callers are routed to the owning machine with fly-replay.
+# Region placement is controlled with `fly scale count`, not this file.
 
 app = 'osaurus-relay'
 primary_region = 'lax'
 
+# Time between SIGTERM and SIGKILL on deploy/restart. main.ts drains in-flight requests for up
+# to 20s, then closes tunnels so hosts reconnect to another machine. Must exceed that drain.
+kill_timeout = 30
+
 [build]
+
+[deploy]
+  # One machine at a time so hosts always have somewhere to reconnect during a deploy.
+  strategy = 'rolling'
+  max_unavailable = 1
 
 [http_service]
   internal_port = 8080
   force_https = true
+  # Idle shutdown would kill every open WebSocket tunnel on the machine.
   auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
 
+  # /health returns 503 once shutdown starts, which pulls the machine out of routing early.
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+
 [[vm]]
-  memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256
+  # 256MB was tight: each in-flight request may buffer up to 10MB of body plus stream queues.
+  memory_mb = 512

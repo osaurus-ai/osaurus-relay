@@ -25,8 +25,8 @@ import type {
   TunnelConnection,
 } from "./types.ts";
 
-const KEEPALIVE_INTERVAL_MS = 30_000;
-const MAX_MISSED_PINGS = 3;
+const KEEPALIVE_INTERVAL_MS = 5_000;
+const MAX_MISSED_PINGS = 2;
 const MAX_AGENTS_PER_TUNNEL = 50;
 const AUTH_TIMEOUT_MS = 10_000;
 const NONCE_EXPIRY_MS = 30_000;

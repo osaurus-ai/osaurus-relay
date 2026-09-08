@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   _setClientForTesting,
+  AGENT_TTL_SECONDS,
   claimAgent,
   claimAgents,
   FLY_MACHINE_ID,
@@ -197,8 +198,11 @@ Deno.test("refreshAgentsTTL - refreshes each owned address", async () => {
   assertEquals(lost, []);
   assertEquals(mock.expireCalls.map((c) => c.key), addrs.map((a) => `agent:${a}`));
   for (const a of addrs) {
-    // TTL was pushed out well beyond the original 1s.
-    assertEquals(mock.store.get(`agent:${a}`)!.expiresAt > Date.now() + 60_000, true);
+    // TTL was pushed out from the original 1s to (roughly) the full AGENT_TTL_SECONDS.
+    assertEquals(
+      mock.store.get(`agent:${a}`)!.expiresAt > Date.now() + (AGENT_TTL_SECONDS - 1) * 1000,
+      true,
+    );
   }
 
   _setClientForTesting(null);

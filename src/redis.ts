@@ -4,7 +4,7 @@ import { log } from "./observability.ts";
 
 export { FLY_MACHINE_ID };
 
-export const AGENT_TTL_SECONDS = 120;
+export const AGENT_TTL_SECONDS = 20;
 
 const REDIS_URL = Deno.env.get("REDIS_URL");
 
